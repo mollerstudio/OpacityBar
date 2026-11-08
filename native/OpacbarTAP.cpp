@@ -130,12 +130,12 @@ static const GUID kIID_IObjectWithSite =   // {FC4801A3-2BA9-11CF-A229-00AA003D7
 namespace winrtabi {
 
 struct HSTRING_OPAQUE__;                 // HSTRING is an opaque pointer
-typedef HSTRING_OPAQUE__* HSTR;
+typedef HSTRING_OPAQUE__* OPAC_HSTR;
 
 // IInspectable {AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90}: IUnknown + 3 methods.
 struct IInspectableAbi : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE GetIids(ULONG* iidCount, IID** iids) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetRuntimeClassName(HSTR* className) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetRuntimeClassName(OPAC_HSTR* className) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetTrustLevel(int* trustLevel) = 0;
 };
 
@@ -145,17 +145,17 @@ struct IInspectableAbi : public IUnknown {
 static const GUID IID_IXamlReaderStatics =
     { 0x9891c6bd, 0x534f, 0x4955, { 0xb8, 0x5a, 0x8a, 0x8d, 0xc0, 0xdc, 0xa6, 0x02 } };
 struct IXamlReaderStatics : public IInspectableAbi {
-    virtual HRESULT STDMETHODCALLTYPE Load(HSTR xaml, IInspectableAbi** result) = 0;
-    virtual HRESULT STDMETHODCALLTYPE LoadWithInitialTemplateValidation(HSTR xaml, IInspectableAbi** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Load(OPAC_HSTR xaml, IInspectableAbi** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE LoadWithInitialTemplateValidation(OPAC_HSTR xaml, IInspectableAbi** result) = 0;
 };
 
-typedef HRESULT (WINAPI* PFN_WindowsCreateString)(const WCHAR* sourceString, UINT32 length, HSTR* string);
-typedef HRESULT (WINAPI* PFN_WindowsDeleteString)(HSTR string);
-typedef HRESULT (WINAPI* PFN_RoGetActivationFactory)(HSTR activatableClassId, REFIID iid, void** factory);
+typedef HRESULT (WINAPI* PFN_WindowsCreateString)(const WCHAR* sourceString, UINT32 length, OPAC_HSTR* string);
+typedef HRESULT (WINAPI* PFN_WindowsDeleteString)(OPAC_HSTR string);
+typedef HRESULT (WINAPI* PFN_RoGetActivationFactory)(OPAC_HSTR activatableClassId, REFIID iid, void** factory);
 
 } // namespace winrtabi
 
-using winrtabi::HSTR;
+using winrtabi::OPAC_HSTR;
 using winrtabi::IInspectableAbi;
 using winrtabi::IXamlReaderStatics;
 
@@ -1273,7 +1273,7 @@ static HRESULT LoadXamlValue(IXamlDiagnostics* diag, const WCHAR* text, UINT32 l
     if (!xaml) return E_OUTOFMEMORY;
 
     static const WCHAR kClass[] = L"Windows.UI.Xaml.Markup.XamlReader";
-    HSTR hsClass = NULL, hsXaml = NULL;
+    OPAC_HSTR hsClass = NULL, hsXaml = NULL;
     IXamlReaderStatics* reader = NULL;
     IInspectableAbi* obj = NULL;
     HRESULT hr = fns.create(kClass, (UINT32)(ARRAYSIZE(kClass) - 1), &hsClass);

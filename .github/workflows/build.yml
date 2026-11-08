@@ -22,7 +22,7 @@ jobs:
     name: Build OpacbarTAP (${{ matrix.arch }})
     runs-on: windows-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - arch: x64
