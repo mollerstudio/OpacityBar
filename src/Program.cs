@@ -239,7 +239,7 @@ namespace Opacbar
                 return;
             }
             // Clicking the tray icon deactivates the flyout first; don't instantly reopen it.
-            if (unchecked(Environment.TickCount - _form.LastHideTick) < 400) return;
+            if ((DateTime.UtcNow - _form.LastHideUtc).TotalMilliseconds < 400) return;
             _form.ShowFlyout();
         }
 

@@ -1,18 +1,25 @@
 # Opacbar ⇄ OpacbarTAP protocol (v2)
 
 The helper DLL (`OpacbarTAP.<arch>.dll`) runs inside explorer.exe. On every XAML UI thread
-that hosts a taskbar it creates one message-only window of class `OpacbarTAP.Sink`
-(parent `HWND_MESSAGE`). Opacbar.exe finds them with `FindWindowEx(HWND_MESSAGE, prev, "OpacbarTAP.Sink", null)`.
+it creates one message-only window of class `OpacbarTAP.Sink` (parent `HWND_MESSAGE`) at the first visual-tree
+callback seen on that thread, plus one **control sink** on the helper's own thread right after injection
+(it exists even if no XAML callback ever arrives). Opacbar.exe finds them with
+`FindWindowEx(HWND_MESSAGE, prev, "OpacbarTAP.Sink", null)`. Use STATS to tell taskbar sinks (high word > 0)
+from other XAML threads (e.g. File Explorer windows) and from the control sink; sending RULES/RESTORE to every
+sink is harmless (non-taskbar threads apply nothing).
 
 All messages are sent with `SendMessageTimeout(SMTO_ABORTIFHUNG, 1000 ms)`.
 
 | Message | wParam | lParam | Returns |
 |---|---|---|---|
 | `WM_APP+0x12` PING | 0 | 0 | `0x0BAC` |
-| `WM_APP+0x15` VERSION | 0 | 0 | protocol version (`2`). v1 helpers return 0 → Opacbar asks the user to restart Explorer to load the new helper |
+| `WM_APP+0x15` VERSION | 0 | 0 | protocol version (`3` = v2 rules + STATS + UNLOAD; the first v2 build returned `2` and has neither). v1 helpers return 0. Helpers returning 0 or 2 cannot be unloaded → Explorer restart needed; ≥ 3 → send UNLOAD, then inject the new copy |
 | `WM_APP+0x11` RESTORE | 0 | 0 | number of properties restored **on the receiving sink's thread**. Undoes every change, rule set becomes empty |
 | `WM_COPYDATA` RULES | sender HWND | `COPYDATASTRUCT{ dwData = 0x4F504143 ('OPAC'), lpData = UTF-16 text, cbData = bytes }` | number of (element, property) pairs currently applied **on the receiving sink's thread** (sum over sinks for a total), or -1 on a bad header / wrong `dwData` / document > 256 KB |
 | `WM_APP+0x14` DUMP | HWND of an Opacbar window | 0 | 1 if the dump was delivered. The helper sends `WM_COPYDATA{ dwData = 0x4F545245 ('OTRE'), UTF-16 text, not NUL-terminated }` to that HWND (synchronously, before returning; the helper waits up to 10 s). Reading every property can take a while: use a longer timeout (e.g. 15 s) for DUMP, or keep pumping messages after a timeout — the `OTRE` message still arrives |
+| `WM_APP+0x16` STATS | 0 | 0 | bits 0–15: elements known on this sink's thread; bits 16–31: of those, elements inside taskbar trees (both saturate at 0xFFFF; on the control sink both counts are process-wide). 64-bit helpers add state bits: 32 = AdviseVisualTreeChange succeeded, 33 = it failed, 34 = still in progress, 35 = this is the control sink, 36 = unloading |
+| `WM_APP+0x17` UNLOAD | 0 | 0 | 1 if the unload was performed/scheduled, 0 if not possible right now (not subscribed yet, already unloading). Send it to **one** sink. Before returning, every thread's applied properties are restored (other sinks are asked synchronously, 2 s each) and the rule set is emptied; then the sinks are destroyed and the control thread unsubscribes (`UnadviseVisualTreeChange`), waits for in-flight callbacks, releases the XAML interfaces and drops the helper's module reference (the code is actually unmapped only once Explorer holds no object of the helper). An unloaded DLL copy stays inert even if injected again: inject a newly named copy (e.g. the hashed file name of the new version). Helpers older than this build pinned themselves and have no UNLOAD (they return 0): those still need an Explorer restart |
+
 
 v1 messages (`WM_APP+0x10` SET) remain supported for compatibility but Opacbar v2 no longer uses them.
 Internally SET is translated to the rules document

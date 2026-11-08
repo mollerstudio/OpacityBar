@@ -66,11 +66,14 @@ namespace Opacbar
         private const uint WM_TAP_DUMP = WM_APP + 0x14;
         private const uint WM_TAP_VERSION = WM_APP + 0x15;
         private const int PING_REPLY = 0x0BAC;
-        private const int ProtocolVersion = 2;
+        private const int ProtocolVersion = 3;
+        private const uint WM_TAP_STATS = WM_APP + 0x16;
+        private const uint WM_TAP_UNLOAD = WM_APP + 0x17;
+        private const int E_NOT_FOUND_HR = unchecked((int)0x80070490);
         private const long RulesId = 0x4F504143; // 'OPAC'
         private const long SendMinIntervalMs = 33; // ~30 sends/s while dragging
         private const string SinkClass = "OpacbarTAP.Sink";
-        private const string OutdatedDetail = "Restart Explorer to finish updating Opacbar";
+        private const string OutdatedDetail = "Opacbar was updated, but Windows is still running the old version inside the taskbar. Restart Explorer once to load the new one; your taskbar disappears for a second and comes back.";
         private static readonly Guid TapClsid = new Guid("6C3B1F0A-3D52-4E8B-9A41-0B5C2E7D9F11");
 
         private static int _endpointCounter = 0;
@@ -100,6 +103,16 @@ namespace Opacbar
         private int _threadHr;
         private string _threadError;
         private uint _injectedPid;
+
+        // startup unload of a helper left behind by an older Opacbar (protocol >= 3 can unload itself)
+        private bool _startupUnloaded;
+        private bool _unloading;
+        private bool _unloadFailed;
+        private int _unloadTries;
+        private long _unloadDeadlineMs;
+        private long _nextUnloadMs;
+        private long _startingSinceMs;
+        private uint _lastPid;
 
         private volatile bool _restarting;
         private TapReceiver _receiver;
@@ -147,7 +160,16 @@ namespace Opacbar
 
             string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Opacbar", "helper");
             Directory.CreateDirectory(dir);
-            string dst = Path.Combine(dir, "OpacbarTAP." + arch + "." + hash + ".dll");
+            // A helper that unloaded itself stays inert if injected again, so every Opacbar run injects a freshly named copy.
+            string dst = Path.Combine(dir, "OpacbarTAP." + arch + "." + hash + "." + Process.GetCurrentProcess().Id + ".dll");
+            try
+            {
+                foreach (string old in Directory.GetFiles(dir, "OpacbarTAP." + arch + ".*.dll"))
+                {
+                    if (!string.Equals(old, dst, StringComparison.OrdinalIgnoreCase)) { try { File.Delete(old); } catch { } }
+                }
+            }
+            catch { }
             if (!File.Exists(dst))
             {
                 string tmp = dst + "." + Process.GetCurrentProcess().Id + ".tmp";
@@ -230,6 +252,25 @@ namespace Opacbar
             }
         }
 
+        private static ulong SinkStats(IntPtr sink)
+        {
+            UIntPtr res;
+            IntPtr ok = NativeMethods.SendMessageTimeout(sink, WM_TAP_STATS, UIntPtr.Zero, IntPtr.Zero,
+                NativeMethods.SMTO_ABORTIFHUNG, 1000, out res);
+            return ok != IntPtr.Zero ? res.ToUInt64() : 0UL;
+        }
+
+        private static string StatsText(ulong st)
+        {
+            string s = "elements " + (st & 0xFFFF) + ", in taskbar " + ((st >> 16) & 0xFFFF);
+            if ((st & (1UL << 32)) != 0) s += ", advise ok";
+            if ((st & (1UL << 33)) != 0) s += ", advise FAILED";
+            if ((st & (1UL << 34)) != 0) s += ", advise in progress";
+            if ((st & (1UL << 35)) != 0) s += ", control sink";
+            if ((st & (1UL << 36)) != 0) s += ", unloading";
+            return s;
+        }
+
         private static int SinkVersion(IntPtr sink)
         {
             int v;
@@ -248,6 +289,20 @@ namespace Opacbar
             long now = Clock.ElapsedMilliseconds;
             CollectInjection(explorerPid, now);
 
+            if (explorerPid != 0 && explorerPid != _lastPid)
+            {
+                // New Explorer: forget old backoff; the new shell has no helper yet.
+                _lastPid = explorerPid;
+                _failCount = 0;
+                _nextAttemptMs = 0;
+                _startingSinceMs = 0;
+                _startupUnloaded = false;
+                _unloading = false;
+                _unloadFailed = false;
+                _unloadTries = 0;
+                _lastPollMs = -100000;
+            }
+
             if (_restarting) return;
             if (!dirty && !_pending && now - _lastPollMs < 1000) return;
             _lastPollMs = now;
@@ -260,6 +315,60 @@ namespace Opacbar
                 if (!Send(s, WM_TAP_PING, out r) || r != PING_REPLY) continue;
                 if (SinkVersion(s) >= ProtocolVersion) good.Add(s);
                 else anyOld = true;
+            }
+
+            if (_unloading)
+            {
+                if (FindSinks().Count == 0)
+                {
+                    _unloading = false;
+                    _startupUnloaded = true;
+                    good.Clear();
+                    anyOld = false;
+                }
+                else if (now > _unloadDeadlineMs)
+                {
+                    _unloading = false;
+                    _unloadFailed = true;
+                }
+                else
+                {
+                    _status = TapStatus.Injecting;
+                    _detail = "Updating the taskbar helper...";
+                    _lastPollMs = now - 800; // poll again soon
+                    return;
+                }
+            }
+
+            if (good.Count > 0 && styled && !_startupUnloaded)
+            {
+                if (_unloadFailed)
+                {
+                    _status = TapStatus.Outdated;
+                    _detail = OutdatedDetail;
+                    return;
+                }
+                if (now >= _nextUnloadMs)
+                {
+                    int ur;
+                    bool sent = Send(good[0], WM_TAP_UNLOAD, UIntPtr.Zero, IntPtr.Zero, 5000, out ur);
+                    if (sent && ur == 1)
+                    {
+                        _unloading = true;
+                        _unloadDeadlineMs = Clock.ElapsedMilliseconds + 5000;
+                        _lastPollMs = now - 800;
+                        _status = TapStatus.Injecting;
+                        _detail = "Updating the taskbar helper...";
+                        return;
+                    }
+                    _unloadTries++;
+                    _nextUnloadMs = Clock.ElapsedMilliseconds + 2000;
+                    if (_unloadTries >= 5) _unloadFailed = true;
+                }
+                _status = _unloadFailed ? TapStatus.Outdated : TapStatus.Injecting;
+                _detail = _unloadFailed ? OutdatedDetail : "Updating the taskbar helper...";
+                _lastPollMs = now - 800;
+                return;
             }
 
             if (good.Count > 0)
@@ -312,6 +421,7 @@ namespace Opacbar
                 {
                     _status = TapStatus.Alive;
                     _detail = "";
+                    if (styled) RefineWithStats(good);
                 }
                 return;
             }
@@ -378,6 +488,36 @@ namespace Opacbar
             _detail = "Starting the taskbar helper...";
         }
 
+        // Uses STATS to say precisely why nothing is visible yet.
+        private void RefineWithStats(List<IntPtr> good)
+        {
+            bool failed = false, progress = false;
+            uint taskbarElems = 0;
+            foreach (IntPtr s in good)
+            {
+                ulong st = SinkStats(s);
+                if ((st & (1UL << 33)) != 0) failed = true;
+                if ((st & (1UL << 34)) != 0) progress = true;
+                uint tb = (uint)((st >> 16) & 0xFFFF);
+                if (tb > taskbarElems) taskbarElems = tb; // control sink counts are process-wide
+            }
+            if (failed)
+            {
+                _status = TapStatus.Failed;
+                _detail = "The taskbar helper loaded but Windows refused to let it watch the taskbar (advise failed). Restart Explorer and try again.";
+            }
+            else if (progress)
+            {
+                _status = TapStatus.Injecting;
+                _detail = "The taskbar helper is still connecting to the taskbar...";
+            }
+            else if (taskbarElems == 0)
+            {
+                _status = TapStatus.Injecting;
+                _detail = "The taskbar helper is running but hasn't found the taskbar yet.";
+            }
+        }
+
         private void StartInjection(string dll, uint pid)
         {
             _threadDone = false;
@@ -400,6 +540,9 @@ namespace Opacbar
             });
             t.IsBackground = true;
             t.Name = "OpacbarTapInject";
+            // InitializeXamlDiagnosticsEx fails with 0x80070490 (ERROR_NOT_FOUND) from an MTA thread on
+            // Win11 ARM64 build 26300; the same call succeeds from an STA thread. Keep this STA.
+            t.SetApartmentState(ApartmentState.STA);
             _thread = t;
             t.Start();
         }
@@ -408,6 +551,24 @@ namespace Opacbar
         {
             if (_thread == null || !_threadDone) return;
             _thread = null;
+
+            if (_threadHr >= 0) _startupUnloaded = true; // our own copy is current
+            if (_threadHr == E_NOT_FOUND_HR)
+            {
+                // Taskbar still starting: retry every second for up to a minute before calling it a failure.
+                if (_startingSinceMs == 0) _startingSinceMs = now;
+                if (now - _startingSinceMs < 60000)
+                {
+                    _status = TapStatus.Injecting;
+                    _detail = "Waiting for the taskbar to start...";
+                    _nextAttemptMs = now + 1000;
+                    return;
+                }
+            }
+            else
+            {
+                _startingSinceMs = 0;
+            }
 
             if (_threadHr >= 0)
             {
@@ -578,7 +739,7 @@ namespace Opacbar
                 int r;
                 Send(good[i], WM_TAP_DUMP, HandleArg(rx.Handle), IntPtr.Zero, 15000, out r);
                 sb.AppendLine();
-                sb.AppendLine("## sink " + (i + 1) + " of " + good.Count);
+                sb.AppendLine("## sink " + (i + 1) + " of " + good.Count + " (" + StatsText(SinkStats(good[i])) + ")");
                 if (rx.Dumps.Count == 0)
                 {
                     sb.AppendLine("(no data)");

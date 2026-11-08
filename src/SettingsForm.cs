@@ -38,7 +38,7 @@ namespace Opacbar
         private FlatButton _restartBtn;
         private SegmentedControl _tabs;
         private StackPanel _pageLook, _pageGeneral;
-        private int _restartTick = int.MinValue;
+        private DateTime _restartClickedUtc = DateTime.MinValue;
         private bool _pickerOpen;
 
         // Look
@@ -56,8 +56,8 @@ namespace Opacbar
         public event EventHandler ConfigChanged;
         public event EventHandler QuitRequested;
 
-        /// <summary>Environment.TickCount at the moment the flyout last hid itself.</summary>
-        public int LastHideTick { get; private set; }
+        /// <summary>UTC time the flyout last hid itself (guards the tray click that caused the hide).</summary>
+        public DateTime LastHideUtc { get; private set; }
 
         public SettingsForm(AppConfig config, TaskbarEngine engine)
         {
@@ -116,11 +116,11 @@ namespace Opacbar
 
             _note = new TextBlock("") { Visible = false };
 
-            _restartBtn = new FlatButton("Restart Explorer") { Visible = false };
+            _restartBtn = new FlatButton("Restart Explorer now") { Visible = false, Primary = true };
             _restartBtn.Click += delegate
             {
                 if (_engine == null) return;
-                _restartTick = Environment.TickCount;
+                _restartClickedUtc = DateTime.UtcNow;
                 _restartBtn.Enabled = false;
                 _engine.RestartExplorer();
             };
@@ -514,7 +514,7 @@ namespace Opacbar
             }
             else if (health == EngineHealth.HelperOutdated)
             {
-                text = "Helper update pending";
+                text = "One quick restart needed";
                 dot = Theme.Warning;
                 note = _engine.HealthDetail;
             }
@@ -544,7 +544,7 @@ namespace Opacbar
             bool showRestart = _config.Enabled && health == EngineHealth.HelperOutdated;
             bool restartChanged = _restartBtn.WantVisible != showRestart;
             _restartBtn.Visible = showRestart;
-            _restartBtn.Enabled = unchecked(Environment.TickCount - _restartTick) > 8000;
+            _restartBtn.Enabled = (DateTime.UtcNow - _restartClickedUtc).TotalSeconds > 8;
 
             bool showNote = !string.IsNullOrEmpty(note);
             bool changed = _note.WantVisible != showNote || (showNote && _note.TextValue != note);
@@ -632,7 +632,7 @@ namespace Opacbar
         {
             if (!Visible) return;
             _statusTimer.Stop();
-            LastHideTick = Environment.TickCount;
+            LastHideUtc = DateTime.UtcNow;
             Hide();
             if (_saveTimer.Enabled) FlushSave();
         }

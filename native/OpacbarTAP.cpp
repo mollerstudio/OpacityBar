@@ -21,9 +21,10 @@
 //       thread that owns it, and its XAML type name and x:Name (needed to match style
 //       rules such as "Taskbar.TaskbarBackground > *#BackgroundFill"). Type names and
 //       x:Names are interned in a small bounded table. No text content is ever read.
-//    3. On every UI thread that hosts a taskbar (a tree containing Taskbar.TaskbarFrame
-//       or SystemTray.SystemTrayFrame) we create one invisible, message-only window
-//       (class "OpacbarTAP.Sink").
+//    3. On every XAML UI thread that reports tree changes we create one invisible,
+//       message-only window (class "OpacbarTAP.Sink"), plus one on our own small control
+//       thread (used for diagnostics and UNLOAD). Rules only ever touch elements inside
+//       taskbar trees (trees containing Taskbar.TaskbarFrame / SystemTray.SystemTrayFrame).
 //    4. Opacbar.exe sends those windows (see native/PROTOCOL.md):
 //         RULES (WM_COPYDATA 'OPAC') - a list of "selector, property, value" rules.
 //                  We set those properties on the matching taskbar elements and restore
@@ -32,7 +33,9 @@
 //         DUMP    - send back a text outline of the taskbar element tree (types, x:Names,
 //                   sizes, margins, paddings, corner radii, background brushes) so the
 //                   user can write rules. Only to the window handle given by the caller.
-//         PING / VERSION - "are you alive?" / "which protocol do you speak?"
+//         PING / VERSION / STATS - "are you alive?" / "which protocol?" / element counts
+//         UNLOAD  - restore everything, unsubscribe, destroy the windows and go inert
+//                   (so a newer helper can be loaded without restarting Explorer).
 //         SET     - the old v1 "paint the background rectangle" message (still works).
 //    5. Values are created by the XAML runtime itself: either from a short string
 //       (IVisualTreeService::CreateInstance, e.g. "#00000000" or "4,0,4,0") or from a
@@ -61,8 +64,10 @@
 //      the actual property changes happen later from our own window procedure.
 //    - Sizes are bounded: rules document <= 256 KB / 512 rules, <= 4096 applied
 //      properties, element map <= 262k slots, dump <= 20000 lines.
-//    - The DLL pins itself in memory once it has subscribed, so Explorer never unloads
-//      code that still has live callbacks or window procedures.
+//    - The DLL holds a reference on itself once it has subscribed, so Explorer never
+//      unloads code that still has live callbacks, threads or window procedures. Only a
+//      completed UNLOAD (unsubscribed, no callback in flight, all windows destroyed, no
+//      object of ours still held by Explorer) drops that reference.
 //    - The XAML Diagnostics and WinRT interfaces below are hand-declared (no SDK
 //      xamlom.h / WinRT headers needed). IIDs, struct layouts and vtable order were
 //      checked against xamlom.idl (Windows SDK / mingw-w64) and Windows.UI.Xaml.winmd.
@@ -100,8 +105,12 @@
 #define WM_OPAC_PENDING       (WM_APP + 0x13)  // Internal: (re)apply the current rules on this thread.
 #define WM_OPAC_DUMP          (WM_APP + 0x14)  // wParam = HWND to send the 'OTRE' dump to.
 #define WM_OPAC_VERSION       (WM_APP + 0x15)  // Returns OPAC_PROTOCOL_VERSION.
+#define WM_OPAC_STATS         (WM_APP + 0x16)  // Returns packed element counts + state bits.
+#define WM_OPAC_UNLOAD        (WM_APP + 0x17)  // Restore everything, unsubscribe, go inert. Returns 1 if done.
+#define WM_OPAC_SHUTDOWN      (WM_APP + 0x18)  // Internal: restore this thread, destroy this sink.
+#define WM_OPAC_UNLOAD_RUN    (WM_APP + 0x19)  // Internal: control thread finishes the unload.
 #define OPAC_PING_REPLY       0x0BAC
-#define OPAC_PROTOCOL_VERSION 2
+#define OPAC_PROTOCOL_VERSION 3   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD
 #define OPAC_FLAG_ON          0x1              // v1 SET bit0: override on
 #define OPAC_FLAG_HIDE_STROKE 0x2              // v1 SET bit1: make BackgroundStroke transparent too
 #define OPAC_COPYDATA_RULES   0x4F504143       // 'OPAC'
@@ -314,6 +323,14 @@ static volatile LONG       g_advised  = 0;    // 1 once AdviseVisualTreeChange i
 static volatile LONG       g_classOk  = 0;    // sink window class registered
 static IVisualTreeService* g_service  = NULL; // kept for the life of the process once obtained
 static IXamlDiagnostics*   g_diag     = NULL; // idem (may stay NULL: XAML values then fail)
+static IVisualTreeServiceCallback2* g_callback = NULL;  // our advised callback (one ref) once advised
+static volatile LONG       g_adviseState = 0; // 0 = not started, 1 = in progress, 2 = ok, 3 = failed
+static volatile LONG       g_unloading   = 0; // 1 once UNLOAD started: everything goes inert
+static volatile LONG       g_unloadRun   = 0; // control thread: run the unload cleanup after its loop
+static volatile LONG       g_inCallback  = 0; // tree-change callbacks currently executing
+static volatile LONG       g_selfRef     = 0; // we hold one module reference (instead of pinning)
+static DWORD               g_tlsIndex    = TLS_OUT_OF_INDEXES;  // per thread: "sink checked"
+static HWND                g_controlSink = NULL; // sink on our own control thread (diagnostics/unload)
 
 struct Locker {
     Locker()  { EnterCriticalSection(&g_lock); }
@@ -360,11 +377,13 @@ static WCHAR* Trim(WCHAR* s)
     return s;
 }
 
-static void PinModule()
+// Takes one extra reference on this DLL (released only by a completed UNLOAD), so Explorer
+// never unloads code that still has live callbacks, threads or window procedures.
+static bool TakeModuleRef()
 {
     HMODULE h = NULL;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                       (LPCWSTR)(void*)&PinModule, &h);
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                              (LPCWSTR)(void*)&TakeModuleRef, &h) != FALSE;
 }
 
 // -------------------------------------------------------------------------------------
@@ -957,7 +976,7 @@ static void DropThreadRecordsLocked(DWORD tid)
 // -------------------------------------------------------------------------------------
 //  Per UI thread: sink window + small cache of plain values created with CreateInstance
 // -------------------------------------------------------------------------------------
-#define MAX_THREADS 32
+#define MAX_THREADS 64
 #define VALUE_CACHE 32
 
 struct CachedValue {
@@ -986,6 +1005,15 @@ static ThreadState* FindOrAddThread(DWORD tid)
     if (ts) return ts;
     for (int i = 0; i < MAX_THREADS; i++) {
         if (g_threads[i].tid == 0) {
+            ZeroMemory(&g_threads[i], sizeof(ThreadState));
+            g_threads[i].tid = tid;
+            return &g_threads[i];
+        }
+    }
+    // Full: reclaim a slot whose thread died (its window is gone without WM_NCDESTROY).
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (g_threads[i].sink && !IsWindow(g_threads[i].sink)) {
+            DropThreadRecordsLocked(g_threads[i].tid);
             ZeroMemory(&g_threads[i], sizeof(ThreadState));
             g_threads[i].tid = tid;
             return &g_threads[i];
@@ -1880,9 +1908,73 @@ static void ForgetThread(DWORD tid, HWND hwnd)
 {
     Locker l;
     ThreadState* ts = FindThread(tid);
+    if (hwnd == g_controlSink) g_controlSink = NULL;
     if (!ts || ts->sink != hwnd) return;
     DropThreadRecordsLocked(tid);
     ZeroMemory(ts, sizeof(ThreadState));
+}
+
+// STATS: low 16 bits = elements known on this thread, bits 16..31 = of those, elements in
+// taskbar trees (both saturate at 0xFFFF). On the control sink the counts are process-wide.
+// 64-bit builds add state bits: 32 advise ok, 33 advise failed, 34 advise in progress,
+// 35 this is the control sink, 36 unloading.
+static LRESULT GetStats(HWND self)
+{
+    const DWORD tid = GetCurrentThreadId();
+    UINT64 known = 0, tree = 0;
+    bool isControl;
+    {
+        Locker l;
+        isControl = (self == g_controlSink);
+        for (SIZE_T i = 0; i < g_mapCap; i++) {
+            const MapSlot* s = &g_map[i];
+            if (s->used != 1 || (!isControl && s->tid != tid)) continue;
+            known++;
+            if (InTaskbarTreeLocked(s)) tree++;
+        }
+    }
+    if (known > 0xFFFF) known = 0xFFFF;
+    if (tree > 0xFFFF) tree = 0xFFFF;
+    UINT64 v = known | (tree << 16);
+#if defined(_WIN64)
+    const LONG st = g_adviseState;
+    if (st == 2) v |= (UINT64)1 << 32;
+    if (st == 3) v |= (UINT64)1 << 33;
+    if (st == 1) v |= (UINT64)1 << 34;
+    if (isControl) v |= (UINT64)1 << 35;
+    if (g_unloading) v |= (UINT64)1 << 36;
+#endif
+    return (LRESULT)v;
+}
+
+// UNLOAD (received by any sink): restore every thread synchronously, destroy the sinks,
+// then let the control thread unsubscribe and release everything.
+static LRESULT BeginUnload(HWND self)
+{
+    HWND others[MAX_THREADS];
+    int no = 0;
+    HWND ctrl = NULL;
+    {
+        Locker l;
+        if (g_unloading || g_adviseState != 2 || !g_controlSink || !g_callback || !g_service)
+            return 0;   // not in a state we can safely unwind
+        g_unloading = 1;
+        ctrl = g_controlSink;
+        for (int i = 0; i < MAX_THREADS; i++) {
+            HWND s = g_threads[i].sink;
+            if (g_threads[i].tid && s && s != self && s != ctrl) others[no++] = s;
+        }
+    }
+    InstallRules(NULL);
+    UINT restored = 0;
+    ApplyRulesOnThisThread(&restored);
+    for (int i = 0; i < no; i++) {
+        DWORD_PTR res = 0;
+        SendMessageTimeoutW(others[i], WM_OPAC_SHUTDOWN, 0, 0, SMTO_ABORTIFHUNG, 2000, &res);
+    }
+    if (self != ctrl) PostMessageW(self, WM_OPAC_SHUTDOWN, 0, 0);   // destroy ourselves later
+    PostMessageW(ctrl, WM_OPAC_UNLOAD_RUN, 0, 0);
+    return 1;
 }
 
 static void AppendW(WCHAR* buf, SIZE_T cap, const WCHAR* s)
@@ -1901,7 +1993,40 @@ static LRESULT HandleRulesDoc(const WCHAR* data, SIZE_T nChars)
 
 static LRESULT CALLBACK SinkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    if (g_unloading) {
+        // Inert: never (re)apply anything once an unload started.
+        if (msg == WM_COPYDATA || msg == WM_OPAC_SET || msg == WM_OPAC_PENDING || msg == WM_OPAC_DUMP)
+            return 0;
+    }
     switch (msg) {
+    case WM_OPAC_STATS:
+        return GetStats(hwnd);
+    case WM_OPAC_UNLOAD:
+        return BeginUnload(hwnd);
+    case WM_OPAC_SHUTDOWN: {
+        if (!g_unloading) return 0;
+        UINT restored = 0;
+        ApplyRulesOnThisThread(&restored);   // rule set is empty: restores this thread
+        HWND ctrl;
+        {
+            Locker l;
+            ctrl = g_controlSink;
+        }
+        if (hwnd != ctrl) DestroyWindow(hwnd);
+        return 1;
+    }
+    case WM_OPAC_UNLOAD_RUN: {
+        HWND ctrl;
+        {
+            Locker l;
+            ctrl = g_controlSink;
+        }
+        if (hwnd == ctrl && g_unloading) {
+            InterlockedExchange(&g_unloadRun, 1);
+            PostQuitMessage(0);   // ControlThread finishes the unload after its loop
+        }
+        return 0;
+    }
     case WM_COPYDATA: {
         const COPYDATASTRUCT* cds = (const COPYDATASTRUCT*)lParam;
         if (!cds || cds->dwData != OPAC_COPYDATA_RULES) return -1;
@@ -2004,6 +2129,117 @@ static HWND EnsureSink(DWORD tid)
     return hwnd;
 }
 
+// Frees our heap state. Only called after an unload when no callback, sink or apply
+// pass can touch it any more.
+static void FreeAllStateLocked()
+{
+    HANDLE heap = GetProcessHeap();
+    for (UINT32 i = 0; i < g_recHigh; i++) {
+        SysFreeString(g_recs[i].origType);
+        SysFreeString(g_recs[i].origValue);
+        ZeroMemory(&g_recs[i], sizeof(Record));   // XAML objects (if any) deliberately leaked
+    }
+    g_recHigh = 0;
+    if (g_map) HeapFree(heap, 0, g_map);
+    g_map = NULL;
+    g_mapCap = g_mapLive = g_mapUsed = 0;
+    if (g_poolStr) {
+        for (UINT32 i = 1; i < g_poolCount && i < POOL_MAX_STRINGS; i++)
+            if (g_poolStr[i]) HeapFree(heap, 0, g_poolStr[i]);
+        HeapFree(heap, 0, g_poolStr);
+    }
+    if (g_poolHash) HeapFree(heap, 0, g_poolHash);
+    g_poolStr = NULL;
+    g_poolHash = NULL;
+    g_poolCount = 1;
+    g_poolChars = 0;
+}
+
+// Runs on the control thread after its message loop ended because of an UNLOAD.
+// Returns true if the module reference may be dropped.
+static bool FinishUnload()
+{
+    IVisualTreeService* svc = NULL;
+    IVisualTreeServiceCallback2* cb = NULL;
+    HWND ctrl = NULL;
+    {
+        Locker l;
+        svc = g_service;
+        cb = g_callback;
+        ctrl = g_controlSink;
+    }
+    if (ctrl) DestroyWindow(ctrl);   // our own thread's window
+    if (!svc || !cb) return false;
+
+    bool safe = SUCCEEDED(svc->UnadviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(cb)));
+
+    // Wait for callbacks that were already running.
+    for (int i = 0; i < 500 && g_inCallback != 0; i++) Sleep(10);
+    if (g_inCallback != 0) safe = false;
+
+    // Wait for every sink to be gone (they destroy themselves on WM_OPAC_SHUTDOWN).
+    for (int i = 0; i < 300; i++) {
+        bool any = false;
+        {
+            Locker l;
+            for (int t = 0; t < MAX_THREADS; t++)
+                if (g_threads[t].sink && IsWindow(g_threads[t].sink)) any = true;
+        }
+        if (!any) break;
+        if (i == 299) safe = false;
+        Sleep(10);
+    }
+    if (!safe) return false;   // stay loaded and inert; nothing released
+
+    IXamlDiagnostics* diag = NULL;
+    {
+        Locker l;
+        g_callback = NULL;
+        g_service = NULL;
+        diag = g_diag;
+        g_diag = NULL;
+        RuleSet* rs = g_rules;   // InstallRules(NULL) already ran; be safe anyway
+        g_rules = NULL;
+        if (rs && --rs->refs == 0) FreeRuleSet(rs);
+        ZeroMemory(g_threads, sizeof(g_threads));
+        FreeAllStateLocked();
+    }
+    cb->Release();
+    svc->Release();
+    if (diag) diag->Release();
+    if (UnregisterClassW(OPAC_SINK_CLASS, g_module)) InterlockedExchange(&g_classOk, 0);
+    InterlockedExchange(&g_advised, 0);
+    return true;
+}
+
+// Our own thread with a sink window: shows up even if no XAML callback ever arrives
+// (field diagnostics via STATS) and performs UNLOAD off the UI threads.
+static DWORD WINAPI ControlThread(LPVOID param)
+{
+    UNREFERENCED_PARAMETER(param);
+    HRESULT hrInit = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HWND sink = EnsureSink(GetCurrentThreadId());
+    if (sink) {
+        {
+            Locker l;
+            g_controlSink = sink;
+        }
+        MSG msg;
+        while (GetMessageW(&msg, NULL, 0, 0) > 0) DispatchMessageW(&msg);
+    }
+    bool release = false;
+    if (g_unloadRun) release = FinishUnload();
+    if (SUCCEEDED(hrInit)) CoUninitialize();
+    // Drop our module reference only when Explorer holds no object of ours any more;
+    // otherwise the code stays mapped (inert) until Explorer exits.
+    if (release && g_selfRef && g_objects == 0 && g_locks == 0) {
+        InterlockedExchange(&g_selfRef, 0);
+        Sleep(100);   // let any callback epilogue that decremented g_inCallback return
+        FreeLibraryAndExitThread(g_module, 0);
+    }
+    return 0;
+}
+
 // -------------------------------------------------------------------------------------
 //  The TAP object: IObjectWithSite (entry point) + IVisualTreeServiceCallback2 (events)
 // -------------------------------------------------------------------------------------
@@ -2019,8 +2255,17 @@ static DWORD WINAPI AdviseThread(LPVOID param)
     // Must not run on the SetSite thread: Advise synchronously walks every UI thread's
     // tree and would deadlock there.
     HRESULT hr = a->svc->AdviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(a->cb));
-    if (FAILED(hr)) InterlockedExchange(&g_advised, 0);   // allow a later injection to retry
-    a->cb->Release();
+    if (SUCCEEDED(hr)) {
+        {
+            Locker l;
+            g_callback = a->cb;   // keep this reference: needed for UnadviseVisualTreeChange
+        }
+        InterlockedExchange(&g_adviseState, 2);
+    } else {
+        a->cb->Release();
+        InterlockedExchange(&g_adviseState, 3);
+        InterlockedExchange(&g_advised, 0);   // allow a later injection to retry
+    }
     HeapFree(GetProcessHeap(), 0, a);
     if (SUCCEEDED(hrInit)) CoUninitialize();
     return 0;
@@ -2065,6 +2310,7 @@ public:
         }
         if (old) old->Release();
         if (!site) return S_OK;
+        if (g_unloading) return S_OK;   // this copy was unloaded: stay inert
 
         // IXamlDiagnostics (optional: only needed for XAML values).
         IXamlDiagnostics* diag = NULL;
@@ -2093,10 +2339,18 @@ public:
         // Only one subscription per Explorer process, even if Opacbar injects again.
         if (InterlockedCompareExchange(&g_advised, 1, 0) != 0) return S_OK;
 
-        PinModule();   // callbacks + window procs live in this DLL: never unload it
+        // Callbacks + window procs + our threads live in this DLL: hold a module reference
+        // until a completed UNLOAD (never released otherwise).
+        if (InterlockedCompareExchange(&g_selfRef, 1, 0) == 0 && !TakeModuleRef())
+            InterlockedExchange(&g_selfRef, 0);
 
+        InterlockedExchange(&g_adviseState, 1);
         AdviseArgs* a = (AdviseArgs*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(AdviseArgs));
-        if (!a) { InterlockedExchange(&g_advised, 0); return E_OUTOFMEMORY; }
+        if (!a) {
+            InterlockedExchange(&g_adviseState, 3);
+            InterlockedExchange(&g_advised, 0);
+            return E_OUTOFMEMORY;
+        }
         a->svc = use;
         a->cb = static_cast<IVisualTreeServiceCallback2*>(this);
         AddRef();
@@ -2106,10 +2360,19 @@ public:
             DWORD err = GetLastError();
             HeapFree(GetProcessHeap(), 0, a);
             Release();
+            InterlockedExchange(&g_adviseState, 3);
             InterlockedExchange(&g_advised, 0);
             return HRESULT_FROM_WIN32(err ? err : ERROR_GEN_FAILURE);
         }
         CloseHandle(th);
+
+        // Control thread (once per process): diagnostics sink + unload worker.
+        static volatile LONG s_controlStarted = 0;
+        if (InterlockedCompareExchange(&s_controlStarted, 1, 0) == 0) {
+            HANDLE ct = CreateThread(NULL, 0, ControlThread, NULL, 0, NULL);
+            if (ct) CloseHandle(ct);
+            else InterlockedExchange(&s_controlStarted, 0);
+        }
         return S_OK;
     }
 
@@ -2134,9 +2397,41 @@ public:
     HRESULT STDMETHODCALLTYPE OnVisualTreeChange(
         ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) override
     {
-        UINT64 handle = element.Handle ? element.Handle : relation.Child;
-        if (handle == 0) return S_OK;
+        InterlockedIncrement(&g_inCallback);
+        if (!g_unloading) TreeChange(relation, element, mutationType);
+        InterlockedDecrement(&g_inCallback);
+        return S_OK;
+    }
+
+    // IVisualTreeServiceCallback2
+    HRESULT STDMETHODCALLTYPE OnElementStateChanged(
+        InstanceHandle element, VisualElementState elementState, LPCWSTR context) override
+    {
+        UNREFERENCED_PARAMETER(element);
+        UNREFERENCED_PARAMETER(elementState);
+        UNREFERENCED_PARAMETER(context);
+        return S_OK;
+    }
+
+private:
+    static void TreeChange(const ParentChildRelation& relation, const VisualElement& element,
+                           VisualMutationType mutationType)
+    {
         const DWORD tid = GetCurrentThreadId();
+
+        // One sink per XAML UI thread, created at the first callback seen on that thread
+        // (not gated on recognizing the taskbar, so the exe can always find and query it).
+        if (g_tlsIndex != TLS_OUT_OF_INDEXES) {
+            if (TlsGetValue(g_tlsIndex) == NULL) {
+                HWND s = EnsureSink(tid);
+                TlsSetValue(g_tlsIndex, s ? (LPVOID)s : (LPVOID)(ULONG_PTR)1);
+            }
+        } else {
+            EnsureSink(tid);
+        }
+
+        UINT64 handle = element.Handle ? element.Handle : relation.Child;
+        if (handle == 0) return;
 
         if (mutationType == Add) {
             const bool isFrame = IsFrameType(element.Type);
@@ -2145,8 +2440,9 @@ public:
             HWND post = NULL;
             {
                 Locker l;
-                UINT16 typeId = InternLocked(element.Type, element.Type ? SysStringLen(element.Type) : 0);
-                UINT16 nameId = InternLocked(element.Name, element.Name ? SysStringLen(element.Name) : 0);
+                // Bounded wcsnlen instead of SysStringLen: don't trust a BSTR length prefix.
+                UINT16 typeId = InternLocked(element.Type, element.Type ? wcsnlen(element.Type, POOL_MAX_LEN + 1) : 0);
+                UINT16 nameId = InternLocked(element.Name, element.Name ? wcsnlen(element.Name, POOL_MAX_LEN + 1) : 0);
                 MapPut(handle, relation.Parent, tid, relation.ChildIndex, typeId, nameId);
                 if (isFrame) MarkRootLocked(handle);
                 if (g_rules && g_rules->count) {
@@ -2186,20 +2482,8 @@ public:
             Locker l;
             MapEraseSubtree(handle);
         }
-        return S_OK;
     }
 
-    // IVisualTreeServiceCallback2
-    HRESULT STDMETHODCALLTYPE OnElementStateChanged(
-        InstanceHandle element, VisualElementState elementState, LPCWSTR context) override
-    {
-        UNREFERENCED_PARAMETER(element);
-        UNREFERENCED_PARAMETER(elementState);
-        UNREFERENCED_PARAMETER(context);
-        return S_OK;
-    }
-
-private:
     ~TapObject()
     {
         if (m_site) m_site->Release();
@@ -2259,8 +2543,8 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 
 STDAPI DllCanUnloadNow()
 {
-    // Once subscribed we stay loaded for the life of Explorer (we are also pinned).
-    if (g_advised || g_objects > 0 || g_locks > 0) return S_FALSE;
+    // While subscribed (or while Explorer holds any object of ours) we stay loaded.
+    if (g_advised || g_selfRef || g_objects > 0 || g_locks > 0) return S_FALSE;
     return S_OK;
 }
 
@@ -2271,6 +2555,12 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved)
         g_module = instance;
         DisableThreadLibraryCalls(instance);
         InitializeCriticalSection(&g_lock);
+        g_tlsIndex = TlsAlloc();   // may be TLS_OUT_OF_INDEXES: handled (slower path)
+    } else if (reason == DLL_PROCESS_DETACH && reserved == NULL) {
+        // Real FreeLibrary (only after a completed UNLOAD), not process exit.
+        if (g_tlsIndex != TLS_OUT_OF_INDEXES) TlsFree(g_tlsIndex);
+        g_tlsIndex = TLS_OUT_OF_INDEXES;
+        DeleteCriticalSection(&g_lock);
     }
     return TRUE;
 }

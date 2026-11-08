@@ -990,6 +990,8 @@ namespace Opacbar
         private bool _hover, _down;
         public string Caption { get; set; }
         public bool Danger { get; set; }
+        /// <summary>Filled, high-emphasis button (inverted monochrome). Use at most one per view.</summary>
+        public bool Primary { get; set; }
 
         public FlatButton(string caption)
         {
@@ -1024,12 +1026,19 @@ namespace Opacbar
             Smooth(g);
             RectangleF r = new RectangleF(0, 0, Width, Height);
             Color fill = Theme.Surface;
-            if (Enabled && _down) fill = Theme.Hover;
+            if (Primary)
+            {
+                // Inverted: text color as fill, surface color as text (white on dark, black on light).
+                fill = Enabled ? Theme.Text : Theme.Mix(Theme.Text, Theme.Surface, 0.6f);
+                if (Enabled && (_hover || _down)) fill = Theme.Mix(Theme.Text, Theme.Surface, _down ? 0.25f : 0.12f);
+            }
+            else if (Enabled && _down) fill = Theme.Hover;
             else if (Enabled && _hover) fill = Theme.Raised;
             Gfx.FillRound(g, fill, r, Theme.PxF(Theme.RadiusControl));
-            Gfx.StrokeRound(g, Ink(Theme.Border), r, Theme.PxF(Theme.RadiusControl), Math.Max(1f, Theme.PxF(1f)));
-            Color fore = Danger ? Theme.Error : Theme.Text;
-            Gfx.Text(g, Caption, Theme.Body, new Rectangle(0, 0, Width, Height), Ink(fore), fill,
+            if (!Primary)
+                Gfx.StrokeRound(g, Ink(Theme.Border), r, Theme.PxF(Theme.RadiusControl), Math.Max(1f, Theme.PxF(1f)));
+            Color fore = Primary ? Theme.Surface : Ink(Danger ? Theme.Error : Theme.Text);
+            Gfx.Text(g, Caption, Theme.Body, new Rectangle(0, 0, Width, Height), fore, fill,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             FocusRing(g, r, Theme.PxF(Theme.RadiusControl));
         }
