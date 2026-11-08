@@ -110,7 +110,8 @@
 #define WM_OPAC_SHUTDOWN      (WM_APP + 0x18)  // Internal: restore this thread, destroy this sink.
 #define WM_OPAC_UNLOAD_RUN    (WM_APP + 0x19)  // Internal: control thread finishes the unload.
 #define OPAC_PING_REPLY       0x0BAC
-#define OPAC_PROTOCOL_VERSION 3   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD
+#define OPAC_PROTOCOL_VERSION 4   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD, 4 = tree service via IXamlDiagnostics
+                                  // Bump on EVERY helper change: Opacbar restarts Explorer to load a newer helper.
 #define OPAC_FLAG_ON          0x1              // v1 SET bit0: override on
 #define OPAC_FLAG_HIDE_STROKE 0x2              // v1 SET bit1: make BackgroundStroke transparent too
 #define OPAC_COPYDATA_RULES   0x4F504143       // 'OPAC'
@@ -2254,7 +2255,9 @@ static DWORD WINAPI AdviseThread(LPVOID param)
     HRESULT hrInit = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     // Must not run on the SetSite thread: Advise synchronously walks every UI thread's
     // tree and would deadlock there.
+    OutputDebugStringW(L"[OpacbarTAP] Advise starting\n");
     HRESULT hr = a->svc->AdviseVisualTreeChange(static_cast<IVisualTreeServiceCallback*>(a->cb));
+    OutputDebugStringW(SUCCEEDED(hr) ? L"[OpacbarTAP] Advise ok\n" : L"[OpacbarTAP] Advise FAILED\n");
     if (SUCCEEDED(hr)) {
         {
             Locker l;
@@ -2309,12 +2312,14 @@ public:
             if (site) site->AddRef();
         }
         if (old) old->Release();
+        OutputDebugStringW(site ? L"[OpacbarTAP] SetSite called\n" : L"[OpacbarTAP] SetSite(NULL)\n");
         if (!site) return S_OK;
         if (g_unloading) return S_OK;   // this copy was unloaded: stay inert
 
-        // IXamlDiagnostics (optional: only needed for XAML values).
+        // IXamlDiagnostics (needed for XAML values and as the route to the tree service).
         IXamlDiagnostics* diag = NULL;
         if (FAILED(site->QueryInterface(IID_IXamlDiagnostics, (void**)&diag))) diag = NULL;
+        OutputDebugStringW(diag ? L"[OpacbarTAP] IXamlDiagnostics ok\n" : L"[OpacbarTAP] IXamlDiagnostics QI FAILED\n");
         if (diag) {
             {
                 Locker l;
@@ -2323,8 +2328,28 @@ public:
             if (diag) diag->Release();
         }
 
+        // The tree service is reached through IXamlDiagnostics (as TranslucentTB's TAP does);
+        // asking the raw site directly fails on some builds and silently disabled the helper.
         IVisualTreeService* svc = NULL;
-        HRESULT hr = site->QueryInterface(IID_IVisualTreeService, (void**)&svc);
+        HRESULT hr = E_NOINTERFACE;
+        {
+            IXamlDiagnostics* d = NULL;
+            {
+                Locker l;
+                d = g_diag;
+                if (d) d->AddRef();
+            }
+            if (d) {
+                hr = d->QueryInterface(IID_IVisualTreeService, (void**)&svc);
+                d->Release();
+            }
+        }
+        if (FAILED(hr) || !svc) {
+            svc = NULL;
+            hr = site->QueryInterface(IID_IVisualTreeService, (void**)&svc);
+        }
+        OutputDebugStringW(SUCCEEDED(hr) && svc ? L"[OpacbarTAP] SetSite: tree service ok\n"
+                                                : L"[OpacbarTAP] SetSite: tree service QI FAILED\n");
         if (FAILED(hr)) return hr;
         if (!svc) return E_NOINTERFACE;
 
@@ -2520,6 +2545,7 @@ public:
         TapObject* obj = new (std::nothrow) TapObject();
         if (!obj) return E_OUTOFMEMORY;
         HRESULT hr = obj->QueryInterface(riid, ppv);
+        OutputDebugStringW(SUCCEEDED(hr) ? L"[OpacbarTAP] CreateInstance ok\n" : L"[OpacbarTAP] CreateInstance: QI FAILED\n");
         obj->Release();
         return hr;
     }
@@ -2535,6 +2561,7 @@ static TapFactory g_factory;
 
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 {
+    OutputDebugStringW(L"[OpacbarTAP] DllGetClassObject\n");
     if (!ppv) return E_POINTER;
     *ppv = NULL;
     if (!IsEqualGUID(rclsid, kCLSID_OpacbarTap)) return CLASS_E_CLASSNOTAVAILABLE;

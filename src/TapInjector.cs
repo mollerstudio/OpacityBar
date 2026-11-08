@@ -66,7 +66,14 @@ namespace Opacbar
         private const uint WM_TAP_DUMP = WM_APP + 0x14;
         private const uint WM_TAP_VERSION = WM_APP + 0x15;
         private const int PING_REPLY = 0x0BAC;
-        private const int ProtocolVersion = 3;
+        // Must equal OPAC_PROTOCOL_VERSION in native/OpacbarTAP.cpp. An older helper found in Explorer
+        // triggers an automatic Explorer restart (Windows accepts only ONE injection per Explorer process:
+        // later InitializeXamlDiagnosticsEx calls into the same process fail with 0x80070490).
+        private const int ProtocolVersion = 4;
+        private uint _injectedOkPid;            // Explorer we already injected successfully (never inject twice)
+        private long _injectOkAtMs;
+        private long _lastAutoRestartMs = -10000000;
+        private int _autoRestarts;
         private const uint WM_TAP_STATS = WM_APP + 0x16;
         private const uint WM_TAP_UNLOAD = WM_APP + 0x17;
         private const int E_NOT_FOUND_HR = unchecked((int)0x80070490);
@@ -340,7 +347,9 @@ namespace Opacbar
                 }
             }
 
-            if (good.Count > 0 && styled && !_startupUnloaded)
+            // A current-version helper is reused as-is: unloading and re-injecting is impossible because
+            // Windows refuses a second injection into the same Explorer (0x80070490).
+            if (false)
             {
                 if (_unloadFailed)
                 {
@@ -433,8 +442,12 @@ namespace Opacbar
             {
                 if (styled)
                 {
-                    _status = TapStatus.Outdated;
-                    _detail = OutdatedDetail;
+                    // Older helper still loaded in Explorer: restart Explorer automatically to load ours.
+                    if (!TryAutoRestart(now, "Updating the taskbar helper (restarting Explorer)..."))
+                    {
+                        _status = TapStatus.Outdated;
+                        _detail = OutdatedDetail;
+                    }
                 }
                 else if (_status == TapStatus.Outdated || _status == TapStatus.Alive)
                 {
@@ -461,6 +474,25 @@ namespace Opacbar
             }
 
             if (_thread != null) return; // injection running; wait for it
+
+            // Already injected into this Explorer: never call InitializeXamlDiagnosticsEx again (it would
+            // fail with 0x80070490). Give the helper time to start; if it never answers, restart Explorer.
+            if (explorerPid != 0 && explorerPid == _injectedOkPid)
+            {
+                if (now - _injectOkAtMs < 15000)
+                {
+                    _status = TapStatus.Injecting;
+                    _detail = "Starting the taskbar helper...";
+                    return;
+                }
+                if (!TryAutoRestart(now, "The taskbar helper didn't start; restarting Explorer..."))
+                {
+                    _status = TapStatus.Failed;
+                    _detail = "The taskbar helper loaded but never answered. Use Quit, then start Opacbar again.";
+                }
+                return;
+            }
+
             if (now < _nextAttemptMs) return;
 
             string dll;
@@ -552,11 +584,24 @@ namespace Opacbar
             if (_thread == null || !_threadDone) return;
             _thread = null;
 
-            if (_threadHr >= 0) _startupUnloaded = true; // our own copy is current
+            if (_threadHr >= 0)
+            {
+                _startupUnloaded = true; // our own copy is current
+                _injectedOkPid = pid;
+                _injectOkAtMs = now;
+            }
             if (_threadHr == E_NOT_FOUND_HR)
             {
-                // Taskbar still starting: retry every second for up to a minute before calling it a failure.
+                // Either the taskbar is still starting, or this Explorer already received an injection
+                // (an earlier Opacbar run / an old helper) and Windows refuses another one. Wait a little
+                // after Explorer starts; after that, restart Explorer automatically.
                 if (_startingSinceMs == 0) _startingSinceMs = now;
+                if (ExplorerAgeSeconds(pid) > 20 && now - _startingSinceMs > 3000 &&
+                    TryAutoRestart(now, "Reconnecting to the taskbar (restarting Explorer)..."))
+                {
+                    _startingSinceMs = 0;
+                    return;
+                }
                 if (now - _startingSinceMs < 60000)
                 {
                     _status = TapStatus.Injecting;
@@ -676,6 +721,32 @@ namespace Opacbar
         }
 
         public bool IsRestarting { get { return _restarting; } }
+
+        /// <summary>
+        /// Restarts Explorer without asking, rate-limited so a broken helper can never cause a restart loop:
+        /// at most 3 automatic restarts per Opacbar session, at least 2 minutes apart.
+        /// </summary>
+        private bool TryAutoRestart(long now, string detail)
+        {
+            if (_restarting) return true;
+            if (_autoRestarts >= 3 || now - _lastAutoRestartMs < 120000) return false;
+            _autoRestarts++;
+            _lastAutoRestartMs = now;
+            _status = TapStatus.Injecting;
+            _detail = detail;
+            RestartExplorer();
+            return true;
+        }
+
+        private static double ExplorerAgeSeconds(uint pid)
+        {
+            try
+            {
+                using (Process p = Process.GetProcessById((int)pid))
+                    return (DateTime.Now - p.StartTime).TotalSeconds;
+            }
+            catch { return 0; }
+        }
 
         // ---- Taskbar map (developer) --------------------------------------------------
 
