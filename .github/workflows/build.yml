@@ -1,0 +1,59 @@
+name: Build Opacbar Standalone Executable
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows Standalone (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Compile Opacbar.exe
+        shell: pwsh
+        run: |
+          ./build.ps1
+          if (-not (Test-Path "dist/Opacbar.exe")) {
+            throw "dist/Opacbar.exe was not generated!"
+          }
+          $hash = (Get-FileHash "dist/Opacbar.exe" -Algorithm SHA256).Hash
+          "SHA256: $hash  Opacbar.exe" | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding utf8
+          Get-Content "dist/SHA256SUMS.txt"
+
+      - name: Package Portable Release ZIP
+        shell: pwsh
+        run: |
+          Copy-Item "README.md" -Destination "dist/README.md"
+          Copy-Item "LICENSE" -Destination "dist/LICENSE"
+          Compress-Archive -Path "dist/Opacbar.exe", "dist/SHA256SUMS.txt", "dist/README.md", "dist/LICENSE" -DestinationPath "dist/Opacbar-Windows-Portable.zip" -Force
+
+      - name: Upload Build Artifact (Opacbar.exe + Portable ZIP)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Opacbar-Windows-Standalone
+          path: |
+            dist/Opacbar.exe
+            dist/Opacbar-Windows-Portable.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (on version tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Opacbar.exe
+            dist/Opacbar-Windows-Portable.zip
+            dist/SHA256SUMS.txt
+          generate_release_notes: true

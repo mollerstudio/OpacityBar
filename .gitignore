@@ -1,0 +1,11 @@
+# Build outputs (remove dist/ from .gitignore if you want to commit the prebuilt .exe)
+bin/
+obj/
+dist/
+*.user
+*.suo
+.vs/
+
+# Runtime user config in local test directory
+opacbar.config.json
+.write_test
