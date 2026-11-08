@@ -2,219 +2,291 @@ using System;
 using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace Opacbar
 {
     public class OpacTrayContext : ApplicationContext
     {
-        private AppConfig _config;
+        private static readonly string[] StyleNames = new string[] { "Clear", "Tint", "Blur", "Acrylic", "Solid", "Windows default" };
+        private static readonly TaskbarStyleMode[] StyleModes = new TaskbarStyleMode[]
+        {
+            TaskbarStyleMode.Clear, TaskbarStyleMode.Tinted, TaskbarStyleMode.Blur,
+            TaskbarStyleMode.Acrylic, TaskbarStyleMode.Solid, TaskbarStyleMode.Normal
+        };
+        private static readonly string[] CornerNames = new string[] { "Square", "Soft", "Round", "Pill" };
+        private static readonly int[] CornerRadii = new int[] { 0, 8, 16, 24 };
+
+        private readonly AppConfig _config;
         private TaskbarEngine _engine;
         private NotifyIcon _trayIcon;
-        private ContextMenuStrip _trayMenu;
-        private SettingsForm _settingsForm;
+        private ContextMenuStrip _menu;
+        private SettingsForm _form;
+        private HotkeyMessageWindow _hotkeyWindow;
+        private Control _marshal;
+        private RegisteredWaitHandle _showWait;
 
-        // Tray Menu Items
-        private ToolStripMenuItem _menuOpenStudio;
-        private ToolStripMenuItem _menuEnableToggle;
-        private ToolStripMenuItem _menuPillToggle;
-        private ToolStripMenuItem _menuModeClear;
-        private ToolStripMenuItem _menuModeAcrylic;
-        private ToolStripMenuItem _menuModeBlur;
-        private ToolStripMenuItem _menuModeTinted;
-        private ToolStripMenuItem _menuModeSolid;
-        private ToolStripMenuItem _menuModeNormal;
-        private ToolStripMenuItem _menuCornerSquare;
-        private ToolStripMenuItem _menuCornerSoft;
-        private ToolStripMenuItem _menuCornerRounded;
-        private ToolStripMenuItem _menuCornerPill;
-        private ToolStripMenuItem _menuStartup;
+        private ToolStripMenuItem _miSettings, _miEnabled, _miFloating, _miStartup;
+        private readonly ToolStripMenuItem[] _miStyles = new ToolStripMenuItem[6];
+        private readonly ToolStripMenuItem[] _miCorners = new ToolStripMenuItem[4];
 
-        public OpacTrayContext(bool startMinimized)
+        public OpacTrayContext(bool startMinimized, bool firstRun, EventWaitHandle showEvent)
         {
             _config = AppConfig.Load();
-            _engine = new TaskbarEngine(_config);
-            _settingsForm = new SettingsForm(_config, _engine);
-            _settingsForm.ConfigChanged += (s, e) => SyncTrayFromConfig();
+            firstRun = firstRun || AppConfig.IsFirstRun;
+            Theme.SetDpi(UiNative.SystemDpi());
+            Theme.Apply(_config.UiTheme);
 
-            BuildTrayMenu();
+            // Hidden control used only to marshal callbacks onto the UI thread.
+            _marshal = new Control();
+            IntPtr unused = _marshal.Handle;
+
+            _engine = new TaskbarEngine(_config);
+            _form = new SettingsForm(_config, _engine);
+            _form.ConfigChanged += delegate { SyncTray(); };
+            _form.QuitRequested += delegate { ExitThread(); };
+
+            BuildMenu();
 
             _trayIcon = new NotifyIcon
             {
-                Icon = BrandTheme.CreateMonochromeAppIcon(_config.Enabled),
-                Text = "Opacbar — Monochrome Taskbar Studio (Left-click to customize)",
-                ContextMenuStrip = _trayMenu,
+                Icon = IconFactory.CreateTrayIcon(_config.Enabled),
+                Text = "Opacbar",
+                ContextMenuStrip = _menu,
                 Visible = true
             };
-
             _trayIcon.MouseClick += OnTrayMouseClick;
-            SyncTrayFromConfig();
 
-            if (!startMinimized)
+            _hotkeyWindow = new HotkeyMessageWindow(delegate { ExitThread(); });
+            SyncTray();
+
+            SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+
+            if (showEvent != null)
             {
-                ShowStudioWindow();
+                _showWait = ThreadPool.RegisterWaitForSingleObject(showEvent, delegate(object state, bool timedOut)
+                {
+                    if (!timedOut) PostToUi(ShowFlyoutFromSignal);
+                }, null, Timeout.Infinite, false);
+            }
+
+            if (firstRun)
+            {
+                string err;
+                _config.Save(out err);
+                PostToUi(delegate
+                {
+                    _form.ShowFlyout();
+                    if (_trayIcon != null)
+                        _trayIcon.ShowBalloonTip(4000, "Opacbar", "Opacbar is running in the tray", ToolTipIcon.None);
+                });
+            }
+            else if (!startMinimized)
+            {
+                // Normal launch: stay quiet in the tray.
             }
         }
 
-        private void BuildTrayMenu()
+        private void PostToUi(Action a)
         {
-            _trayMenu = new ContextMenuStrip
+            try
             {
-                Renderer = new MonochromeMenuRenderer(_config.UILightTheme),
-                Font = new Font("Segoe UI", 9f, FontStyle.Regular),
-                ShowImageMargin = true
-            };
+                if (_marshal != null && _marshal.IsHandleCreated && !_marshal.IsDisposed)
+                    _marshal.BeginInvoke(a);
+            }
+            catch { }
+        }
 
-            _menuOpenStudio = new ToolStripMenuItem("Open Opacbar Studio...")
-            {
-                Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold)
-            };
-            _menuOpenStudio.Click += (s, e) => ShowStudioWindow();
+        private void ShowFlyoutFromSignal()
+        {
+            if (_form == null || _form.IsDisposed) return;
+            if (!_form.Visible) _form.ShowFlyout();
+        }
 
-            _menuEnableToggle = new ToolStripMenuItem("Enable Taskbar Styling");
-            _menuEnableToggle.Click += (s, e) =>
+        // ---- Menu -------------------------------------------------------------------
+
+        private void BuildMenu()
+        {
+            _menu = new ContextMenuStrip();
+            _menu.Renderer = new MonochromeMenuRenderer();
+            _menu.ShowImageMargin = false;
+            _menu.ShowCheckMargin = true;
+            _menu.Opening += delegate { PrepareMenu(); };
+            _menu.HandleCreated += delegate { Theme.RoundCorners(_menu.Handle); };
+
+            _miSettings = new ToolStripMenuItem("Settings…");
+            _miSettings.Click += delegate { if (!_form.Visible) _form.ShowFlyout(); };
+
+            _miEnabled = new ToolStripMenuItem("Enabled");
+            _miEnabled.Click += delegate
             {
                 _config.Enabled = !_config.Enabled;
                 ApplyAndSave();
             };
 
-            // Quick Material Mode SubItems
-            _menuModeClear = CreateModeItem("Mode: Clear (100% Transparent)", TaskbarStyleMode.Clear);
-            _menuModeAcrylic = CreateModeItem("Mode: Acrylic Glass", TaskbarStyleMode.Acrylic);
-            _menuModeBlur = CreateModeItem("Mode: Frosted Blur", TaskbarStyleMode.Blur);
-            _menuModeTinted = CreateModeItem("Mode: Monochrome Tint", TaskbarStyleMode.Tinted);
-            _menuModeSolid = CreateModeItem("Mode: Solid Monochrome", TaskbarStyleMode.Solid);
-            _menuModeNormal = CreateModeItem("Mode: Windows Default", TaskbarStyleMode.Normal);
+            ToolStripMenuItem style = new ToolStripMenuItem("Style");
+            for (int i = 0; i < StyleNames.Length; i++)
+            {
+                int idx = i;
+                ToolStripMenuItem mi = new ToolStripMenuItem(StyleNames[i]);
+                mi.Click += delegate
+                {
+                    _config.Enabled = true;
+                    _config.DesktopProfile.Mode = StyleModes[idx];
+                    ApplyAndSave();
+                };
+                _miStyles[i] = mi;
+                style.DropDownItems.Add(mi);
+            }
 
-            // Floating Pill & Quick Corner Items
-            _menuPillToggle = new ToolStripMenuItem("Floating Pill Taskbar");
-            _menuPillToggle.Click += (s, e) =>
+            _miFloating = new ToolStripMenuItem("Floating");
+            _miFloating.Click += delegate
             {
                 _config.FloatingPillEnabled = !_config.FloatingPillEnabled;
                 ApplyAndSave();
             };
 
-            _menuCornerSquare = CreateCornerItem("Corners: Square (0 px)", 0);
-            _menuCornerSoft = CreateCornerItem("Corners: Soft (8 px)", 8);
-            _menuCornerRounded = CreateCornerItem("Corners: Rounded (16 px)", 16);
-            _menuCornerPill = CreateCornerItem("Corners: Full Pill (26 px)", 26);
+            ToolStripMenuItem corners = new ToolStripMenuItem("Corners");
+            for (int i = 0; i < CornerNames.Length; i++)
+            {
+                int idx = i;
+                ToolStripMenuItem mi = new ToolStripMenuItem(CornerNames[i]);
+                mi.Click += delegate
+                {
+                    _config.FloatingPillEnabled = true;
+                    _config.CornerRadius = CornerRadii[idx];
+                    ApplyAndSave();
+                };
+                _miCorners[i] = mi;
+                corners.DropDownItems.Add(mi);
+            }
 
-            _menuStartup = new ToolStripMenuItem("Launch at Windows Sign-In");
-            _menuStartup.Click += (s, e) =>
+            _miStartup = new ToolStripMenuItem("Start with Windows");
+            _miStartup.Click += delegate
             {
                 _config.LaunchAtStartup = !_config.LaunchAtStartup;
                 ApplyAndSave();
             };
 
-            ToolStripMenuItem menuExit = new ToolStripMenuItem("Exit & Restore Default Taskbar");
-            menuExit.Click += (s, e) => ExitThread();
+            ToolStripMenuItem quit = new ToolStripMenuItem("Quit");
+            quit.Click += delegate { ExitThread(); };
 
-            _trayMenu.Items.Add(_menuOpenStudio);
-            _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add(_menuEnableToggle);
-            _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add(_menuModeClear);
-            _trayMenu.Items.Add(_menuModeAcrylic);
-            _trayMenu.Items.Add(_menuModeBlur);
-            _trayMenu.Items.Add(_menuModeTinted);
-            _trayMenu.Items.Add(_menuModeSolid);
-            _trayMenu.Items.Add(_menuModeNormal);
-            _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add(_menuPillToggle);
-            _trayMenu.Items.Add(_menuCornerSquare);
-            _trayMenu.Items.Add(_menuCornerSoft);
-            _trayMenu.Items.Add(_menuCornerRounded);
-            _trayMenu.Items.Add(_menuCornerPill);
-            _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add(_menuStartup);
-            _trayMenu.Items.Add(new ToolStripSeparator());
-            _trayMenu.Items.Add(menuExit);
-        }
+            _menu.Items.Add(_miSettings);
+            _menu.Items.Add(new ToolStripSeparator());
+            _menu.Items.Add(_miEnabled);
+            _menu.Items.Add(style);
+            _menu.Items.Add(_miFloating);
+            _menu.Items.Add(corners);
+            _menu.Items.Add(_miStartup);
+            _menu.Items.Add(new ToolStripSeparator());
+            _menu.Items.Add(quit);
 
-        private ToolStripMenuItem CreateModeItem(string label, TaskbarStyleMode mode)
-        {
-            ToolStripMenuItem item = new ToolStripMenuItem(label);
-            item.Click += (s, e) =>
+            foreach (ToolStripMenuItem sub in new ToolStripMenuItem[] { style, corners })
             {
-                _config.Enabled = true;
-                _config.DesktopProfile.Mode = mode;
-                ApplyAndSave();
-            };
-            return item;
+                ToolStripDropDownMenu dd = sub.DropDown as ToolStripDropDownMenu;
+                if (dd != null)
+                {
+                    dd.Renderer = _menu.Renderer;
+                    dd.ShowImageMargin = false;
+                    dd.ShowCheckMargin = true;
+                    ToolStripDropDownMenu captured = dd;
+                    dd.HandleCreated += delegate { Theme.RoundCorners(captured.Handle); };
+                }
+            }
         }
 
-        private ToolStripMenuItem CreateCornerItem(string label, int radius)
+        private void PrepareMenu()
         {
-            ToolStripMenuItem item = new ToolStripMenuItem(label);
-            item.Click += (s, e) =>
-            {
-                _config.FloatingPillEnabled = true;
-                _config.CornerRadius = radius;
-                ApplyAndSave();
-            };
-            return item;
+            // Size the menu for the monitor the user clicked on.
+            Theme.SetDpi(UiNative.DpiForPoint(Cursor.Position));
+            _menu.Font = Theme.Body;
+            Padding itemPad = new Padding(Theme.Px(4), Theme.Px(5), Theme.Px(4), Theme.Px(5));
+            ApplyMenuLook(_menu.Items, itemPad);
+            _miSettings.Font = Theme.BodyBold;
+            SyncTray();
         }
+
+        private void ApplyMenuLook(ToolStripItemCollection items, Padding pad)
+        {
+            foreach (ToolStripItem it in items)
+            {
+                ToolStripMenuItem mi = it as ToolStripMenuItem;
+                if (mi == null) continue;
+                mi.Font = Theme.Body;
+                mi.Padding = pad;
+                if (mi.HasDropDownItems)
+                {
+                    mi.DropDown.Font = Theme.Body;
+                    ApplyMenuLook(mi.DropDownItems, pad);
+                }
+            }
+        }
+
+        // ---- State sync -------------------------------------------------------------
 
         private void ApplyAndSave()
         {
             string err;
             _config.Save(out err);
-            _engine.UpdateConfig(_config);
-            _settingsForm.SyncControlsFromConfig();
-            SyncTrayFromConfig();
+            if (_engine != null) _engine.UpdateConfig(_config);
+            if (_form != null && !_form.IsDisposed) _form.SyncControlsFromConfig();
+            SyncTray();
         }
 
-        private void SyncTrayFromConfig()
+        private void SyncTray()
         {
-            _trayMenu.Renderer = new MonochromeMenuRenderer(_config.UILightTheme);
+            if (_trayIcon == null) return;
+            Theme.Apply(_config.UiTheme);
+            _form.OnThemeChanged();
 
-            Icon oldIcon = _trayIcon.Icon;
-            _trayIcon.Icon = BrandTheme.CreateMonochromeAppIcon(_config.Enabled);
-            if (oldIcon != null) oldIcon.Dispose();
+            Icon old = _trayIcon.Icon;
+            _trayIcon.Icon = IconFactory.CreateTrayIcon(_config.Enabled);
+            if (old != null) old.Dispose();
 
-            _menuEnableToggle.Checked = _config.Enabled;
-            _menuPillToggle.Checked = _config.FloatingPillEnabled;
-            _menuStartup.Checked = _config.LaunchAtStartup;
+            _miEnabled.Checked = _config.Enabled;
+            _miFloating.Checked = _config.FloatingPillEnabled;
+            _miStartup.Checked = _config.LaunchAtStartup;
 
             TaskbarStyleMode m = _config.DesktopProfile.Mode;
-            _menuModeClear.Checked = (m == TaskbarStyleMode.Clear);
-            _menuModeAcrylic.Checked = (m == TaskbarStyleMode.Acrylic);
-            _menuModeBlur.Checked = (m == TaskbarStyleMode.Blur);
-            _menuModeTinted.Checked = (m == TaskbarStyleMode.Tinted);
-            _menuModeSolid.Checked = (m == TaskbarStyleMode.Solid);
-            _menuModeNormal.Checked = (m == TaskbarStyleMode.Normal);
-
-            int r = _config.CornerRadius;
-            _menuCornerSquare.Checked = (_config.FloatingPillEnabled && r == 0);
-            _menuCornerSoft.Checked = (_config.FloatingPillEnabled && r > 0 && r <= 10);
-            _menuCornerRounded.Checked = (_config.FloatingPillEnabled && r > 10 && r <= 20);
-            _menuCornerPill.Checked = (_config.FloatingPillEnabled && r > 20);
+            for (int i = 0; i < _miStyles.Length; i++) _miStyles[i].Checked = (StyleModes[i] == m);
+            for (int i = 0; i < _miCorners.Length; i++)
+                _miCorners[i].Checked = _config.FloatingPillEnabled && _config.CornerRadius == CornerRadii[i];
         }
+
+        private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+        {
+            if (e.Category != UserPreferenceCategory.General && e.Category != UserPreferenceCategory.Color) return;
+            PostToUi(delegate { if (_trayIcon != null) SyncTray(); });
+        }
+
+        // ---- Tray interaction -------------------------------------------------------
 
         private void OnTrayMouseClick(object sender, MouseEventArgs e)
         {
-            if (e.Button == MouseButtons.Left)
+            if (e.Button != MouseButtons.Left) return;
+            if (_form.Visible)
             {
-                if (_settingsForm.Visible)
-                {
-                    _settingsForm.Hide();
-                }
-                else
-                {
-                    ShowStudioWindow();
-                }
+                _form.HideFlyout();
+                return;
             }
-        }
-
-        private void ShowStudioWindow()
-        {
-            _settingsForm.PositionNearTray();
-            _settingsForm.Show();
-            _settingsForm.Activate();
-            _settingsForm.BringToFront();
+            // Clicking the tray icon deactivates the flyout first; don't instantly reopen it.
+            if (unchecked(Environment.TickCount - _form.LastHideTick) < 400) return;
+            _form.ShowFlyout();
         }
 
         protected override void ExitThreadCore()
         {
+            SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            if (_showWait != null)
+            {
+                _showWait.Unregister(null);
+                _showWait = null;
+            }
+            if (_hotkeyWindow != null)
+            {
+                _hotkeyWindow.Dispose();
+                _hotkeyWindow = null;
+            }
             if (_trayIcon != null)
             {
                 _trayIcon.Visible = false;
@@ -226,33 +298,86 @@ namespace Opacbar
                 _engine.Dispose();
                 _engine = null;
             }
-            if (_settingsForm != null && !_settingsForm.IsDisposed)
+            if (_form != null && !_form.IsDisposed)
             {
-                _settingsForm.Dispose();
+                _form.HideFlyout();
+                _form.Dispose();
+            }
+            if (_marshal != null)
+            {
+                _marshal.Dispose();
+                _marshal = null;
             }
             base.ExitThreadCore();
         }
     }
 
+    public class HotkeyMessageWindow : NativeWindow, IDisposable
+    {
+        private const int HOTKEY_ID_PANIC_EXIT = 9001;
+        private readonly Action _onQuit;
+
+        public HotkeyMessageWindow(Action onQuit)
+        {
+            _onQuit = onQuit;
+            CreateHandle(new CreateParams());
+            try
+            {
+                NativeMethods.RegisterHotKey(
+                    Handle,
+                    HOTKEY_ID_PANIC_EXIT,
+                    NativeMethods.MOD_CONTROL | NativeMethods.MOD_SHIFT | NativeMethods.MOD_ALT,
+                    NativeMethods.VK_Q);
+            }
+            catch { }
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == NativeMethods.WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_ID_PANIC_EXIT)
+            {
+                if (_onQuit != null) _onQuit();
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        public void Dispose()
+        {
+            if (Handle != IntPtr.Zero)
+            {
+                try { NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID_PANIC_EXIT); } catch { }
+                DestroyHandle();
+            }
+        }
+    }
+
     public static class Program
     {
+        private const string MutexName = "Local\\Opacbar_Monochrome_SingleInstance_Mutex";
+        private const string ShowEventName = "Local\\Opacbar_ShowFlyout";
+
         private static Mutex _singleInstanceMutex;
 
         [STAThread]
         public static void Main(string[] args)
         {
             bool createdNew;
-            _singleInstanceMutex = new Mutex(true, "Local\\Opacbar_Monochrome_SingleInstance_Mutex", out createdNew);
+            _singleInstanceMutex = new Mutex(true, MutexName, out createdNew);
             if (!createdNew)
             {
+                // Another instance is running: ask it to open its flyout, then leave.
+                try
+                {
+                    UiNative.AllowSetForegroundWindow(-1);
+                    using (EventWaitHandle ev = EventWaitHandle.OpenExisting(ShowEventName))
+                        ev.Set();
+                }
+                catch { }
                 return;
             }
 
-            try
-            {
-                NativeMethods.SetProcessDPIAware();
-            }
-            catch { }
+            EventWaitHandle showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -270,11 +395,12 @@ namespace Opacbar
                 }
             }
 
-            using (OpacTrayContext ctx = new OpacTrayContext(startMinimized))
+            using (OpacTrayContext ctx = new OpacTrayContext(startMinimized, false, showEvent))
             {
                 Application.Run(ctx);
             }
 
+            GC.KeepAlive(showEvent);
             GC.KeepAlive(_singleInstanceMutex);
         }
     }

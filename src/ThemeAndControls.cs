@@ -1,209 +1,703 @@
-using System;
-using System.IO;
+﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace Opacbar
 {
-    public static class BrandTheme
+    // ------------------------------------------------------------------------------------
+    // Private native helpers (kept here so they never collide with NativeMethods.cs)
+    // ------------------------------------------------------------------------------------
+    internal static class UiNative
     {
-        // Strict Monochrome Palette
-        public static Color GetBgPrimary(bool light) { return light ? Color.FromArgb(250, 250, 250) : Color.FromArgb(10, 10, 10); }
-        public static Color GetBgCard(bool light) { return light ? Color.FromArgb(255, 255, 255) : Color.FromArgb(18, 18, 18); }
-        public static Color GetBgElevated(bool light) { return light ? Color.FromArgb(240, 240, 240) : Color.FromArgb(28, 28, 28); }
-        public static Color GetBorder(bool light) { return light ? Color.FromArgb(218, 218, 218) : Color.FromArgb(42, 42, 42); }
-        public static Color GetBorderStrong(bool light) { return light ? Color.FromArgb(20, 20, 20) : Color.FromArgb(245, 245, 245); }
-        public static Color GetTextPrimary(bool light) { return light ? Color.FromArgb(12, 12, 12) : Color.FromArgb(245, 245, 245); }
-        public static Color GetTextSecondary(bool light) { return light ? Color.FromArgb(110, 110, 110) : Color.FromArgb(145, 145, 145); }
-        public static Color GetTextMuted(bool light) { return light ? Color.FromArgb(155, 155, 155) : Color.FromArgb(95, 95, 95); }
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
 
-        // Only Semantic Accent Colors: Success (Green), Warning (Yellow), Error (Red)
-        public static readonly Color AccentSuccess = Color.FromArgb(34, 197, 94);   // #22C55E
-        public static readonly Color AccentWarning = Color.FromArgb(234, 179, 8);   // #EAB308
-        public static readonly Color AccentError = Color.FromArgb(239, 68, 68);     // #EF4444
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForSystem();
 
-        public static GraphicsPath CreateRoundedRect(Rectangle bounds, int radius)
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromPoint(POINT pt, uint flags);
+
+        [DllImport("shcore.dll")]
+        private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT
         {
-            GraphicsPath path = new GraphicsPath();
-            if (radius <= 0 || bounds.Width <= 0 || bounds.Height <= 0)
-            {
-                path.AddRectangle(bounds);
-                return path;
-            }
-            int d = Math.Min(radius * 2, Math.Min(bounds.Width, bounds.Height));
-            path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
-            path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
-            path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
-            path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
-            path.CloseFigure();
-            return path;
+            public int X;
+            public int Y;
+            public POINT(int x, int y) { X = x; Y = y; }
         }
 
-        public static Icon CreateMonochromeAppIcon(bool active)
+        public static int WindowDpi(IntPtr hwnd)
         {
-            using (Bitmap bmp = new Bitmap(32, 32))
-            using (Graphics g = Graphics.FromImage(bmp))
+            try
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Transparent);
+                uint d = GetDpiForWindow(hwnd);
+                if (d >= 48) return (int)d;
+            }
+            catch { }
+            return SystemDpi();
+        }
 
-                // Outer monochrome rounded square
-                Rectangle outer = new Rectangle(2, 2, 28, 28);
-                using (GraphicsPath path = CreateRoundedRect(outer, 7))
-                using (SolidBrush bg = new SolidBrush(Color.FromArgb(15, 15, 15)))
-                using (Pen border = new Pen(Color.FromArgb(240, 240, 240), 2f))
+        public static int SystemDpi()
+        {
+            try
+            {
+                uint d = GetDpiForSystem();
+                if (d >= 48) return (int)d;
+            }
+            catch { }
+            try
+            {
+                using (Graphics g = Graphics.FromHwnd(IntPtr.Zero)) return (int)Math.Round(g.DpiX);
+            }
+            catch { }
+            return 96;
+        }
+
+        public static int DpiForPoint(Point p)
+        {
+            try
+            {
+                IntPtr mon = MonitorFromPoint(new POINT(p.X, p.Y), 2 /* nearest */);
+                uint dx, dy;
+                if (mon != IntPtr.Zero && GetDpiForMonitor(mon, 0 /* effective */, out dx, out dy) == 0 && dx >= 48)
+                    return (int)dx;
+            }
+            catch { }
+            return SystemDpi();
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Theme: the tokens from STYLEGUIDE.md. Everything reads from here.
+    // ------------------------------------------------------------------------------------
+    public static class Theme
+    {
+        // Spacing (logical px)
+        public const int Space1 = 4;
+        public const int Space2 = 8;
+        public const int Space3 = 12;
+        public const int Space4 = 16;
+        public const int Space6 = 24;
+
+        // Radii (logical px)
+        public const int RadiusControl = 6;
+        public const int RadiusSegment = 8;
+        public const int RadiusMenu = 4;
+
+        // Window
+        public const int FlyoutWidth = 380;
+        public const int FlyoutMaxHeight = 560;
+        public const int FlyoutEdgeGap = 12;
+
+        // Type scale (points; rendered as pt * 96/72 * scale pixels)
+        public const float TitlePt = 14f;
+        public const float BodyPt = 10f;
+        public const float CaptionPt = 9f;
+        public const float SmallPt = 8f;
+
+        // Palette (assigned by Apply)
+        public static Color Surface, Raised, Hover, Border, Text, TextSecondary, TextDisabled,
+                            TrackOff, OnFill, OnFillText, Success, Warning, Error;
+
+        public static bool Dark { get; private set; }
+
+        public static event Action Changed;
+
+        private static float _scale = 1f;
+        private static string _family;
+        private static readonly Dictionary<string, Font> _fonts = new Dictionary<string, Font>();
+
+        static Theme()
+        {
+            _scale = Math.Max(1f, UiNative.SystemDpi() / 96f);
+            Apply(0);
+        }
+
+        public static float Scale
+        {
+            get { return _scale; }
+            set
+            {
+                if (value < 0.5f) value = 0.5f;
+                _scale = value;
+            }
+        }
+
+        public static void SetDpi(int dpi)
+        {
+            Scale = dpi / 96f;
+        }
+
+        public static int Px(float logical)
+        {
+            return (int)Math.Round(logical * _scale);
+        }
+
+        public static float PxF(float logical)
+        {
+            return logical * _scale;
+        }
+
+        // ---- Windows theme detection ----
+
+        private static bool ReadLightFlag(string name)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", false))
                 {
-                    g.FillPath(bg, path);
-                    g.DrawPath(border, path);
+                    if (k != null)
+                    {
+                        object v = k.GetValue(name);
+                        if (v is int) return (int)v != 0;
+                    }
                 }
+            }
+            catch { }
+            return false;
+        }
 
-                // Floating pill taskbar motif at the bottom of the icon
-                Rectangle pill = new Rectangle(6, 20, 20, 5);
-                using (GraphicsPath pillPath = CreateRoundedRect(pill, 2))
-                using (SolidBrush pillBrush = new SolidBrush(Color.FromArgb(245, 245, 245)))
+        /// <summary>True when Windows apps use the light theme.</summary>
+        public static bool SystemAppsLight() { return ReadLightFlag("AppsUseLightTheme"); }
+
+        /// <summary>True when the taskbar and tray use the light theme.</summary>
+        public static bool SystemTaskbarLight() { return ReadLightFlag("SystemUsesLightTheme"); }
+
+        /// <summary>uiTheme: 0 = follow Windows, 1 = dark, 2 = light.</summary>
+        public static void Apply(int uiTheme)
+        {
+            bool dark = uiTheme == 1 || (uiTheme != 2 && !SystemAppsLight());
+            Dark = dark;
+            if (dark)
+            {
+                Surface = Color.FromArgb(0x1F, 0x1F, 0x1F);
+                Raised = Color.FromArgb(0x2B, 0x2B, 0x2B);
+                Hover = Color.FromArgb(0x38, 0x38, 0x38);
+                Border = Color.FromArgb(0x3D, 0x3D, 0x3D);
+                Text = Color.FromArgb(0xFF, 0xFF, 0xFF);
+                TextSecondary = Color.FromArgb(0xA6, 0xA6, 0xA6);
+                TextDisabled = Color.FromArgb(0x66, 0x66, 0x66);
+                TrackOff = Color.FromArgb(0x8A, 0x8A, 0x8A);
+                OnFill = Color.FromArgb(0xFF, 0xFF, 0xFF);
+                OnFillText = Color.FromArgb(0x00, 0x00, 0x00);
+                Success = Color.FromArgb(0x3F, 0xB9, 0x50);
+                Warning = Color.FromArgb(0xE3, 0xB3, 0x41);
+                Error = Color.FromArgb(0xF8, 0x51, 0x49);
+            }
+            else
+            {
+                Surface = Color.FromArgb(0xFA, 0xFA, 0xFA);
+                Raised = Color.FromArgb(0xEC, 0xEC, 0xEC);
+                Hover = Color.FromArgb(0xE0, 0xE0, 0xE0);
+                Border = Color.FromArgb(0xD9, 0xD9, 0xD9);
+                Text = Color.FromArgb(0x11, 0x11, 0x11);
+                TextSecondary = Color.FromArgb(0x5E, 0x5E, 0x5E);
+                TextDisabled = Color.FromArgb(0xAA, 0xAA, 0xAA);
+                TrackOff = Color.FromArgb(0x7A, 0x7A, 0x7A);
+                OnFill = Color.FromArgb(0x11, 0x11, 0x11);
+                OnFillText = Color.FromArgb(0xFF, 0xFF, 0xFF);
+                Success = Color.FromArgb(0x1A, 0x7F, 0x37);
+                Warning = Color.FromArgb(0x9A, 0x67, 0x00);
+                Error = Color.FromArgb(0xCF, 0x22, 0x2E);
+            }
+            Action h = Changed;
+            if (h != null) h();
+        }
+
+        public static Color Mix(Color a, Color b, float t)
+        {
+            return Color.FromArgb(
+                (int)Math.Round(a.R + (b.R - a.R) * t),
+                (int)Math.Round(a.G + (b.G - a.G) * t),
+                (int)Math.Round(a.B + (b.B - a.B) * t));
+        }
+
+        // ---- Fonts ----
+
+        private static string Family
+        {
+            get
+            {
+                if (_family == null)
                 {
-                    g.FillPath(pillBrush, pillPath);
+                    _family = "Segoe UI";
+                    try
+                    {
+                        using (InstalledFontCollection c = new InstalledFontCollection())
+                        {
+                            foreach (FontFamily f in c.Families)
+                            {
+                                if (string.Equals(f.Name, "Segoe UI Variable Text", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    _family = f.Name;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
                 }
+                return _family;
+            }
+        }
 
-                // Status dot in top-right of icon (Green = Active, Yellow = Paused)
-                Color dotColor = active ? AccentSuccess : AccentWarning;
-                using (SolidBrush dotBrush = new SolidBrush(dotColor))
-                {
-                    g.FillEllipse(dotBrush, 20, 7, 5, 5);
-                }
+        /// <summary>Font sized in points at the current scale, built in pixels so it is DPI-correct.</summary>
+        public static Font Font(float pt, bool bold)
+        {
+            string key = pt.ToString("0.0") + (bold ? "b" : "r") + _scale.ToString("0.000");
+            Font f;
+            if (!_fonts.TryGetValue(key, out f))
+            {
+                float px = pt * 96f / 72f * _scale;
+                f = new Font(Family, px, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+                _fonts[key] = f;
+            }
+            return f;
+        }
 
-                IntPtr hIcon = bmp.GetHicon();
-                Icon icon = (Icon)Icon.FromHandle(hIcon).Clone();
-                NativeMethods.DestroyIcon(hIcon);
-                return icon;
+        public static Font Title { get { return Font(TitlePt, true); } }
+        public static Font Body { get { return Font(BodyPt, false); } }
+        public static Font BodyBold { get { return Font(BodyPt, true); } }
+        public static Font Caption { get { return Font(CaptionPt, false); } }
+        public static Font CaptionBold { get { return Font(CaptionPt, true); } }
+        public static Font Small { get { return Font(SmallPt, false); } }
+
+        // ---- Window chrome ----
+
+        public static void RoundCorners(IntPtr hwnd)
+        {
+            try
+            {
+                int pref = 2; // DWMWCP_ROUND
+                NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref pref, 4);
+            }
+            catch { }
+        }
+
+        public static void SetBorderColor(IntPtr hwnd, Color c)
+        {
+            try
+            {
+                int bgr = c.R | (c.G << 8) | (c.B << 16);
+                NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_BORDER_COLOR, ref bgr, 4);
+            }
+            catch { }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Drawing helpers
+    // ------------------------------------------------------------------------------------
+    public static class Gfx
+    {
+        public static GraphicsPath RoundRect(RectangleF r, float radius)
+        {
+            GraphicsPath p = new GraphicsPath();
+            float d = Math.Max(0f, radius) * 2f;
+            if (d > r.Width) d = r.Width;
+            if (d > r.Height) d = r.Height;
+            if (d <= 0.5f)
+            {
+                p.AddRectangle(r);
+                return p;
+            }
+            p.AddArc(r.X, r.Y, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+
+        public static void FillRound(Graphics g, Color c, RectangleF r, float radius)
+        {
+            using (GraphicsPath p = RoundRect(r, radius))
+            using (SolidBrush b = new SolidBrush(c))
+                g.FillPath(b, p);
+        }
+
+        public static void StrokeRound(Graphics g, Color c, RectangleF r, float radius, float width)
+        {
+            RectangleF i = new RectangleF(r.X + width / 2f, r.Y + width / 2f, r.Width - width, r.Height - width);
+            using (GraphicsPath p = RoundRect(i, Math.Max(0f, radius - width / 2f)))
+            using (Pen pen = new Pen(c, width))
+                g.DrawPath(pen, p);
+        }
+
+        public static void FillCircle(Graphics g, Color c, float cx, float cy, float d)
+        {
+            using (SolidBrush b = new SolidBrush(c))
+                g.FillEllipse(b, cx - d / 2f, cy - d / 2f, d, d);
+        }
+
+        public const TextFormatFlags Flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix |
+                                             TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine;
+
+        public static void Text(Graphics g, string s, Font f, Rectangle r, Color fore, Color back, TextFormatFlags extra)
+        {
+            if (string.IsNullOrEmpty(s)) return;
+            TextRenderer.DrawText(g, s, f, r, fore, back, Flags | extra);
+        }
+
+        public static int Measure(string s, Font f)
+        {
+            if (string.IsNullOrEmpty(s)) return 0;
+            return TextRenderer.MeasureText(s, f, new Size(int.MaxValue, int.MaxValue),
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width;
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Base control
+    // ------------------------------------------------------------------------------------
+    public abstract class FlyoutControl : Control
+    {
+        /// <summary>Fixed width in logical px when placed as a trailing control in a Row (0 = none).</summary>
+        public int LogicalWidth { get; set; }
+
+        protected FlyoutControl()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+            BackColor = Theme.Surface;
+        }
+
+        private bool _wantVisible = true;
+
+        /// <summary>
+        /// What was last assigned to Visible. Control.Visible returns false while any parent
+        /// is hidden (e.g. the flyout before first show), which would make layout skip everything.
+        /// </summary>
+        public bool WantVisible { get { return _wantVisible; } }
+
+        protected override void SetVisibleCore(bool value)
+        {
+            _wantVisible = value;
+            base.SetVisibleCore(value);
+        }
+
+        public virtual int PreferredWidth { get { return Theme.Px(LogicalWidth); } }
+
+        public virtual int GetPreferredHeight(int width) { return Height; }
+
+        /// <summary>Text/ink color that fades when the control is disabled.</summary>
+        protected Color Ink(Color c)
+        {
+            return Enabled ? c : Theme.Mix(c, Theme.Surface, 0.6f);
+        }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            base.OnEnabledChanged(e);
+            Invalidate();
+        }
+
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            e.Graphics.Clear(Theme.Surface);
+        }
+
+        protected void Smooth(Graphics g)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        }
+
+        protected void FocusRing(Graphics g, RectangleF r, float radius)
+        {
+            if (Focused && ShowFocusCues)
+                Gfx.StrokeRound(g, Theme.Text, r, radius, Math.Max(1f, Theme.PxF(1.5f)));
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Vertical stacking helper
+    // ------------------------------------------------------------------------------------
+    public class StackPanel : FlyoutControl
+    {
+        public int Gap { get; set; }   // logical px between children
+        public int Pad { get; set; }   // logical px on all sides
+
+        public StackPanel()
+        {
+            Gap = Theme.Space2;
+            Pad = 0;
+        }
+
+        private static bool IsShown(Control c)
+        {
+            FlyoutControl f = c as FlyoutControl;
+            return f != null ? f.WantVisible : c.Visible;
+        }
+
+        private static int ChildHeight(Control c, int width)
+        {
+            FlyoutControl f = c as FlyoutControl;
+            return f != null ? f.GetPreferredHeight(width) : c.Height;
+        }
+
+        public override int GetPreferredHeight(int width)
+        {
+            int inner = Math.Max(0, width - 2 * Theme.Px(Pad));
+            int total = 2 * Theme.Px(Pad);
+            bool any = false;
+            for (int i = 0; i < Controls.Count; i++)
+            {
+                Control c = Controls[i];
+                if (!IsShown(c)) continue;
+                if (any) total += Theme.Px(Gap);
+                total += ChildHeight(c, inner);
+                any = true;
+            }
+            return total;
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            int pad = Theme.Px(Pad);
+            int inner = Math.Max(0, Width - 2 * pad);
+            int y = pad;
+            bool any = false;
+            for (int i = 0; i < Controls.Count; i++)
+            {
+                Control c = Controls[i];
+                if (!IsShown(c)) continue;
+                if (any) y += Theme.Px(Gap);
+                int h = ChildHeight(c, inner);
+                c.SetBounds(pad, y, inner, h);
+                if (c is FlyoutControl) c.PerformLayout();
+                y += h;
+                any = true;
             }
         }
     }
 
-    // Custom Monochrome Toggle Switch
-    public class OpacSwitch : Control
+    // ------------------------------------------------------------------------------------
+    // Toggle
+    // ------------------------------------------------------------------------------------
+    public class ToggleSwitch : FlyoutControl
     {
         private bool _checked;
-        private bool _lightTheme;
-        private bool _useSemanticGreen = false;
         public event EventHandler CheckedChanged;
+
+        public ToggleSwitch()
+        {
+            LogicalWidth = 40;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+            Cursor = Cursors.Hand;
+        }
 
         public bool Checked
         {
             get { return _checked; }
             set
             {
-                if (_checked != value)
-                {
-                    _checked = value;
-                    Invalidate();
-                    if (CheckedChanged != null) CheckedChanged(this, EventArgs.Empty);
-                }
+                if (_checked == value) return;
+                _checked = value;
+                Invalidate();
+                EventHandler h = CheckedChanged;
+                if (h != null) h(this, EventArgs.Empty);
             }
         }
 
-        public bool UseSemanticGreen
-        {
-            get { return _useSemanticGreen; }
-            set { _useSemanticGreen = value; Invalidate(); }
-        }
-
-        public bool LightTheme
-        {
-            get { return _lightTheme; }
-            set { _lightTheme = value; Invalidate(); }
-        }
-
-        public OpacSwitch()
-        {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
-                     ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent;
-            Size = new Size(44, 24);
-            Cursor = Cursors.Hand;
-        }
+        public override int GetPreferredHeight(int width) { return Theme.Px(20); }
 
         protected override void OnClick(EventArgs e)
         {
             base.OnClick(e);
-            Checked = !Checked;
+            if (Enabled) Checked = !Checked;
         }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                Checked = !Checked;
+                e.Handled = true;
+            }
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-
-            Rectangle track = new Rectangle(1, 1, Width - 3, Height - 3);
-            Color trackFill;
-            Color thumbColor;
-            Color borderColor;
-
+            Smooth(g);
+            float w = Theme.PxF(40), h = Theme.PxF(20);
+            RectangleF r = new RectangleF((Width - w) / 2f, (Height - h) / 2f, w, h);
+            float pad = Theme.PxF(4), d = h - 2 * pad;
+            float cy = r.Y + h / 2f;
             if (_checked)
             {
-                if (_useSemanticGreen)
-                {
-                    trackFill = BrandTheme.AccentSuccess;
-                    borderColor = BrandTheme.AccentSuccess;
-                    thumbColor = Color.FromArgb(10, 10, 10);
-                }
-                else
-                {
-                    trackFill = _lightTheme ? Color.FromArgb(15, 15, 15) : Color.FromArgb(245, 245, 245);
-                    borderColor = trackFill;
-                    thumbColor = _lightTheme ? Color.FromArgb(250, 250, 250) : Color.FromArgb(12, 12, 12);
-                }
+                Gfx.FillRound(g, Ink(Theme.OnFill), r, h / 2f);
+                Gfx.FillCircle(g, Ink(Theme.OnFillText), r.Right - pad - d / 2f, cy, d);
             }
             else
             {
-                trackFill = _lightTheme ? Color.FromArgb(228, 228, 228) : Color.FromArgb(30, 30, 30);
-                borderColor = _lightTheme ? Color.FromArgb(195, 195, 195) : Color.FromArgb(62, 62, 62);
-                thumbColor = _lightTheme ? Color.FromArgb(110, 110, 110) : Color.FromArgb(140, 140, 140);
+                Gfx.StrokeRound(g, Ink(Theme.TrackOff), r, h / 2f, Math.Max(1f, Theme.PxF(1f)));
+                Gfx.FillCircle(g, Ink(Theme.TrackOff), r.X + pad + d / 2f, cy, d);
             }
-
-            using (GraphicsPath path = BrandTheme.CreateRoundedRect(track, track.Height / 2))
-            using (SolidBrush fill = new SolidBrush(trackFill))
-            using (Pen pen = new Pen(borderColor, 1.2f))
-            {
-                g.FillPath(fill, path);
-                g.DrawPath(pen, path);
-            }
-
-            int pad = 4;
-            int thumbSize = Height - (pad * 2) - 2;
-            int thumbX = _checked ? (Width - thumbSize - pad - 2) : pad;
-            Rectangle thumbRect = new Rectangle(thumbX, pad, thumbSize, thumbSize);
-
-            using (SolidBrush thumbBrush = new SolidBrush(thumbColor))
-            {
-                g.FillEllipse(thumbBrush, thumbRect);
-            }
+            RectangleF ring = r;
+            ring.Inflate(Theme.PxF(2), Theme.PxF(2));
+            FocusRing(g, ring, h / 2f + Theme.PxF(2));
         }
     }
 
-    // Custom Monochrome Slider
-    public class OpacSlider : Control
+    // ------------------------------------------------------------------------------------
+    // Segmented control
+    // ------------------------------------------------------------------------------------
+    public class SegmentedControl : FlyoutControl
     {
-        private int _minimum = 0;
-        private int _maximum = 100;
-        private int _value = 50;
-        private bool _dragging = false;
-        private bool _lightTheme = false;
+        private readonly string[] _items;
+        private int _selected = -1;
+        private int _hover = -1;
+        public event EventHandler SelectedIndexChanged;
 
-        public event EventHandler ValueChanged;
-
-        public int Minimum
+        public SegmentedControl(params string[] items)
         {
-            get { return _minimum; }
-            set { _minimum = value; Invalidate(); }
+            _items = items;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+            Cursor = Cursors.Hand;
         }
 
-        public int Maximum
+        public int SelectedIndex
         {
-            get { return _maximum; }
-            set { _maximum = Math.Max(_minimum + 1, value); Invalidate(); }
+            get { return _selected; }
+            set
+            {
+                if (_selected == value) return;
+                _selected = value;
+                Invalidate();
+                EventHandler h = SelectedIndexChanged;
+                if (h != null) h(this, EventArgs.Empty);
+            }
+        }
+
+        public override int GetPreferredHeight(int width) { return Theme.Px(32); }
+
+        private int HitTest(int x)
+        {
+            if (_items.Length == 0 || Width <= 0) return -1;
+            int i = x * _items.Length / Width;
+            return Math.Max(0, Math.Min(_items.Length - 1, i));
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int h = HitTest(e.X);
+            if (h != _hover) { _hover = h; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _hover = -1;
+            Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left && Enabled)
+            {
+                Focus();
+                SelectedIndex = HitTest(e.X);
+            }
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            Keys k = keyData & Keys.KeyCode;
+            if (k == Keys.Left || k == Keys.Right) return true;
+            return base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Left && _selected > 0) { SelectedIndex = _selected - 1; e.Handled = true; }
+            else if (e.KeyCode == Keys.Right && _selected < _items.Length - 1) { SelectedIndex = _selected + 1; e.Handled = true; }
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Smooth(g);
+            RectangleF all = new RectangleF(0, 0, Width, Height);
+            Gfx.FillRound(g, Ink(Theme.Raised), all, Theme.PxF(Theme.RadiusSegment));
+            if (_items.Length == 0) return;
+
+            float inset = Theme.PxF(2);
+            float segW = (Width - 2 * inset) / _items.Length;
+            Font font = Theme.Caption;
+            for (int i = 0; i < _items.Length; i++)
+            {
+                RectangleF seg = new RectangleF(inset + i * segW, inset, segW, Height - 2 * inset);
+                bool sel = i == _selected;
+                Color fill = Color.Empty;
+                Color fore = Theme.Text;
+                if (sel) { fill = Theme.OnFill; fore = Theme.OnFillText; }
+                else if (i == _hover && Enabled) fill = Theme.Hover;
+
+                if (fill != Color.Empty)
+                    Gfx.FillRound(g, Ink(fill), seg, Theme.PxF(Theme.RadiusControl));
+                Rectangle tr = Rectangle.Round(seg);
+                Gfx.Text(g, _items[i], sel ? Theme.CaptionBold : font, tr, Ink(fore),
+                    sel ? Ink(Theme.OnFill) : (i == _hover && Enabled ? Theme.Hover : Ink(Theme.Raised)),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+            FocusRing(g, all, Theme.PxF(Theme.RadiusSegment));
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Slider with label and value text
+    // ------------------------------------------------------------------------------------
+    public class LabeledSlider : FlyoutControl
+    {
+        private int _min, _max, _value;
+        private bool _drag;
+        public string Label { get; set; }
+        public string Hint { get; set; }
+        public bool Gradient { get; set; }        // black -> white track (for the shade slider)
+        public Func<int, string> Format { get; set; }
+        public event EventHandler ValueChanged;
+
+        public LabeledSlider(string label, int min, int max)
+        {
+            Label = label;
+            _min = min;
+            _max = max;
+            _value = min;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+            Cursor = Cursors.Hand;
         }
 
         public int Value
@@ -211,38 +705,367 @@ namespace Opacbar
             get { return _value; }
             set
             {
-                int clamped = Math.Max(_minimum, Math.Min(_maximum, value));
-                if (_value != clamped)
-                {
-                    _value = clamped;
-                    Invalidate();
-                    if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
-                }
+                int v = Math.Max(_min, Math.Min(_max, value));
+                if (v == _value) return;
+                _value = v;
+                Invalidate();
+                EventHandler h = ValueChanged;
+                if (h != null) h(this, EventArgs.Empty);
             }
         }
 
-        public bool LightTheme
+        public bool Dragging { get { return _drag; } }
+
+        public override int GetPreferredHeight(int width) { return Theme.Px(46); }
+
+        private float ThumbD { get { return Theme.PxF(16); } }
+
+        private float TrackY { get { return Theme.PxF(34); } }
+
+        private void ValueFromX(int x)
         {
-            get { return _lightTheme; }
-            set { _lightTheme = value; Invalidate(); }
+            float left = ThumbD / 2f, right = Width - ThumbD / 2f;
+            float t = (x - left) / Math.Max(1f, right - left);
+            t = Math.Max(0f, Math.Min(1f, t));
+            Value = _min + (int)Math.Round(t * (_max - _min));
         }
 
-        public OpacSlider()
+        protected override void OnMouseDown(MouseEventArgs e)
         {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
-                     ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent;
-            Height = 26;
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || !Enabled) return;
+            Focus();
+            _drag = true;
+            Capture = true;
+            ValueFromX(e.X);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (_drag) ValueFromX(e.X);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            _drag = false;
+            Capture = false;
+            Invalidate();
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            Keys k = keyData & Keys.KeyCode;
+            if (k == Keys.Left || k == Keys.Right || k == Keys.Home || k == Keys.End) return true;
+            return base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            int step = Math.Max(1, (_max - _min) / 20);
+            switch (e.KeyCode)
+            {
+                case Keys.Left: Value = _value - 1; e.Handled = true; break;
+                case Keys.Right: Value = _value + 1; e.Handled = true; break;
+                case Keys.PageDown: Value = _value - step; e.Handled = true; break;
+                case Keys.PageUp: Value = _value + step; e.Handled = true; break;
+                case Keys.Home: Value = _min; e.Handled = true; break;
+                case Keys.End: Value = _max; e.Handled = true; break;
+            }
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Smooth(g);
+
+            int lineH = Theme.Px(20);
+            Rectangle labelRect = new Rectangle(0, 0, Width, lineH);
+            string valueText = Format != null ? Format(_value) : _value.ToString();
+            int valueW = Gfx.Measure(valueText, Theme.Body) + Theme.Px(2);
+            Gfx.Text(g, valueText, Theme.Body, new Rectangle(Width - valueW, 0, valueW, lineH),
+                Ink(Theme.TextSecondary), Theme.Surface, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+
+            int lw = Gfx.Measure(Label, Theme.Body);
+            Gfx.Text(g, Label, Theme.Body, new Rectangle(0, 0, Math.Max(0, Width - valueW - Theme.Px(8)), lineH),
+                Ink(Theme.Text), Theme.Surface, TextFormatFlags.VerticalCenter);
+            if (!string.IsNullOrEmpty(Hint))
+            {
+                int hx = lw + Theme.Px(8);
+                int hw = Width - valueW - Theme.Px(8) - hx;
+                if (hw > 0)
+                    Gfx.Text(g, Hint, Theme.Caption, new Rectangle(hx, 0, hw, lineH),
+                        Ink(Theme.TextSecondary), Theme.Surface, TextFormatFlags.VerticalCenter);
+            }
+
+            float trackH = Theme.PxF(4);
+            float left = ThumbD / 2f, right = Width - ThumbD / 2f;
+            float cy = TrackY;
+            RectangleF track = new RectangleF(left, cy - trackH / 2f, right - left, trackH);
+            float t = _max > _min ? (float)(_value - _min) / (_max - _min) : 0f;
+            float tx = left + t * (right - left);
+
+            if (Gradient)
+            {
+                RectangleF gr = new RectangleF(left - Theme.PxF(2), cy - Theme.PxF(3), right - left + Theme.PxF(4), Theme.PxF(6));
+                using (GraphicsPath p = Gfx.RoundRect(gr, gr.Height / 2f))
+                using (LinearGradientBrush br = new LinearGradientBrush(gr, Color.Black, Color.White, 0f))
+                {
+                    if (!Enabled)
+                    {
+                        br.LinearColors = new Color[] { Ink(Color.Black), Ink(Color.White) };
+                    }
+                    g.FillPath(br, p);
+                }
+                Gfx.StrokeRound(g, Ink(Theme.TrackOff), gr, gr.Height / 2f, Math.Max(1f, Theme.PxF(1f)));
+            }
+            else
+            {
+                Gfx.FillRound(g, Ink(Theme.Hover), track, trackH / 2f);
+                if (tx > left)
+                    Gfx.FillRound(g, Ink(Theme.OnFill), new RectangleF(left, track.Y, tx - left, trackH), trackH / 2f);
+            }
+
+            // Thumb: filled disc with a surface-colored ring so it reads on any track.
+            float ring = Theme.PxF(2);
+            Gfx.FillCircle(g, Theme.Surface, tx, cy, ThumbD + ring);
+            Gfx.FillCircle(g, Ink(Theme.OnFill), tx, cy, ThumbD - Theme.PxF(2));
+            if (Focused && ShowFocusCues)
+            {
+                using (Pen pen = new Pen(Theme.Text, Math.Max(1f, Theme.PxF(1.5f))))
+                    g.DrawEllipse(pen, tx - ThumbD / 2f - ring, cy - ThumbD / 2f - ring, ThumbD + 2 * ring, ThumbD + 2 * ring);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Row: label (+ optional description) on the left, one control on the right
+    // ------------------------------------------------------------------------------------
+    public class Row : FlyoutControl
+    {
+        private FlyoutControl _trailing;
+        public string Label { get; set; }
+        public string Description { get; set; }
+
+        public Row(string label, FlyoutControl trailing)
+        {
+            Label = label;
+            _trailing = trailing;
+            if (trailing != null) Controls.Add(trailing);
+        }
+
+        public FlyoutControl Trailing { get { return _trailing; } }
+
+        public override int GetPreferredHeight(int width)
+        {
+            return Theme.Px(string.IsNullOrEmpty(Description) ? 36 : 52);
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            if (_trailing == null) return;
+            int w = _trailing.PreferredWidth;
+            if (w <= 0) w = Theme.Px(40);
+            int h = _trailing.GetPreferredHeight(w);
+            _trailing.SetBounds(Width - w, (Height - h) / 2, w, h);
+        }
+
+        protected override void OnClick(EventArgs e)
+        {
+            base.OnClick(e);
+            ToggleSwitch t = _trailing as ToggleSwitch;
+            if (t != null && Enabled) t.Checked = !t.Checked;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            int tw = _trailing != null ? _trailing.Width + Theme.Px(Theme.Space3) : 0;
+            int avail = Math.Max(0, Width - tw);
+            if (string.IsNullOrEmpty(Description))
+            {
+                Gfx.Text(g, Label, Theme.Body, new Rectangle(0, 0, avail, Height), Ink(Theme.Text), Theme.Surface,
+                    TextFormatFlags.VerticalCenter);
+            }
+            else
+            {
+                int l1 = Theme.Px(20), l2 = Theme.Px(16);
+                int top = (Height - l1 - l2) / 2;
+                Gfx.Text(g, Label, Theme.Body, new Rectangle(0, top, avail, l1), Ink(Theme.Text), Theme.Surface,
+                    TextFormatFlags.VerticalCenter);
+                Gfx.Text(g, Description, Theme.Caption, new Rectangle(0, top + l1, avail, l2), Ink(Theme.TextSecondary),
+                    Theme.Surface, TextFormatFlags.VerticalCenter);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Section header
+    // ------------------------------------------------------------------------------------
+    public class SectionHeader : FlyoutControl
+    {
+        public string Caption { get; set; }
+
+        public SectionHeader(string caption) { Caption = caption; }
+
+        public override int GetPreferredHeight(int width) { return Theme.Px(24); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Gfx.Text(e.Graphics, Caption, Theme.CaptionBold, new Rectangle(0, 0, Width, Height),
+                Ink(Theme.TextSecondary), Theme.Surface, TextFormatFlags.Bottom);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Text block with optional status dot (wraps to the available width)
+    // ------------------------------------------------------------------------------------
+    public class TextBlock : FlyoutControl
+    {
+        private string _text;
+        private Color? _dot;
+        public bool Small { get; set; }
+        public bool Center { get; set; }
+        public bool Secondary { get; set; }
+
+        public TextBlock(string text)
+        {
+            _text = text;
+            Secondary = true;
+        }
+
+        public string TextValue
+        {
+            get { return _text; }
+            set { _text = value; Invalidate(); }
+        }
+
+        public Color? Dot
+        {
+            get { return _dot; }
+            set { _dot = value; Invalidate(); }
+        }
+
+        private Font F { get { return Small ? Theme.Small : Theme.Caption; } }
+
+        private int Indent { get { return _dot.HasValue ? Theme.Px(16) : 0; } }
+
+        public override int GetPreferredHeight(int width)
+        {
+            if (string.IsNullOrEmpty(_text)) return 0;
+            int w = Math.Max(10, width - Indent);
+            Size s = TextRenderer.MeasureText(_text, F, new Size(w, int.MaxValue),
+                TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            return Math.Max(s.Height, Theme.Px(16));
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            if (string.IsNullOrEmpty(_text)) return;
+            int indent = Indent;
+            if (_dot.HasValue)
+            {
+                Smooth(g);
+                Gfx.FillCircle(g, _dot.Value, Theme.PxF(4), Theme.PxF(8), Theme.PxF(8));
+            }
+            TextFormatFlags fl = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+            if (Center) fl |= TextFormatFlags.HorizontalCenter;
+            TextRenderer.DrawText(g, _text, F, new Rectangle(indent, 0, Width - indent, Height),
+                Secondary ? Theme.TextSecondary : Theme.Text, Theme.Surface, fl);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Flat button
+    // ------------------------------------------------------------------------------------
+    public class FlatButton : FlyoutControl
+    {
+        private bool _hover, _down;
+        public string Caption { get; set; }
+        public bool Danger { get; set; }
+
+        public FlatButton(string caption)
+        {
+            Caption = caption;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
             Cursor = Cursors.Hand;
         }
 
-        private void UpdateFromMouse(int mouseX)
+        public override int GetPreferredHeight(int width) { return Theme.Px(36); }
+
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; _down = false; Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); _down = true; Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _down = false; Invalidate(); }
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnKeyDown(KeyEventArgs e)
         {
-            int pad = 9;
-            int trackWidth = Math.Max(1, Width - pad * 2);
-            double ratio = (double)(mouseX - pad) / trackWidth;
-            ratio = Math.Max(0.0, Math.Min(1.0, ratio));
-            Value = _minimum + (int)Math.Round(ratio * (_maximum - _minimum));
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                OnClick(EventArgs.Empty);
+                e.Handled = true;
+            }
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Smooth(g);
+            RectangleF r = new RectangleF(0, 0, Width, Height);
+            Color fill = Theme.Surface;
+            if (Enabled && _down) fill = Theme.Hover;
+            else if (Enabled && _hover) fill = Theme.Raised;
+            Gfx.FillRound(g, fill, r, Theme.PxF(Theme.RadiusControl));
+            Gfx.StrokeRound(g, Ink(Theme.Border), r, Theme.PxF(Theme.RadiusControl), Math.Max(1f, Theme.PxF(1f)));
+            Color fore = Danger ? Theme.Error : Theme.Text;
+            Gfx.Text(g, Caption, Theme.Body, new Rectangle(0, 0, Width, Height), Ink(fore), fill,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            FocusRing(g, r, Theme.PxF(Theme.RadiusControl));
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Header: title, status line with dot, master toggle. The title area drags the window.
+    // ------------------------------------------------------------------------------------
+    public class HeaderBar : FlyoutControl
+    {
+        private readonly ToggleSwitch _toggle = new ToggleSwitch();
+        private string _status = "";
+        private Color _statusColor = Theme.TextSecondary;
+        public event EventHandler DragRequested;
+
+        public HeaderBar()
+        {
+            Controls.Add(_toggle);
+        }
+
+        public ToggleSwitch Toggle { get { return _toggle; } }
+
+        public void SetStatus(string text, Color dot)
+        {
+            _status = text;
+            _statusColor = dot;
+            Invalidate();
+        }
+
+        public override int GetPreferredHeight(int width) { return Theme.Px(44); }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            int w = _toggle.PreferredWidth, h = _toggle.GetPreferredHeight(w);
+            _toggle.SetBounds(Width - w, (Height - h) / 2, w, h);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -250,468 +1073,166 @@ namespace Opacbar
             base.OnMouseDown(e);
             if (e.Button == MouseButtons.Left)
             {
-                _dragging = true;
-                UpdateFromMouse(e.X);
-            }
-        }
-
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            base.OnMouseMove(e);
-            if (_dragging)
-            {
-                UpdateFromMouse(e.X);
-            }
-        }
-
-        protected override void OnMouseUp(MouseEventArgs e)
-        {
-            base.OnMouseUp(e);
-            _dragging = false;
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-
-            int pad = 9;
-            int trackY = Height / 2 - 2;
-            int trackWidth = Math.Max(1, Width - pad * 2);
-            Rectangle trackRect = new Rectangle(pad, trackY, trackWidth, 4);
-
-            Color bgTrack = _lightTheme ? Color.FromArgb(220, 220, 220) : Color.FromArgb(42, 42, 42);
-            Color fgTrack = _lightTheme ? Color.FromArgb(18, 18, 18) : Color.FromArgb(245, 245, 245);
-
-            using (GraphicsPath bgPath = BrandTheme.CreateRoundedRect(trackRect, 2))
-            using (SolidBrush bgBrush = new SolidBrush(bgTrack))
-            {
-                g.FillPath(bgBrush, bgPath);
-            }
-
-            double ratio = (double)(_value - _minimum) / Math.Max(1, _maximum - _minimum);
-            int activeWidth = (int)Math.Round(ratio * trackWidth);
-            if (activeWidth > 0)
-            {
-                Rectangle activeRect = new Rectangle(pad, trackY, Math.Max(4, activeWidth), 4);
-                using (GraphicsPath fgPath = BrandTheme.CreateRoundedRect(activeRect, 2))
-                using (SolidBrush fgBrush = new SolidBrush(fgTrack))
-                {
-                    g.FillPath(fgBrush, fgPath);
-                }
-            }
-
-            int thumbX = pad + activeWidth - 7;
-            int thumbY = Height / 2 - 7;
-            Rectangle thumbRect = new Rectangle(thumbX, thumbY, 14, 14);
-
-            Color thumbFill = _lightTheme ? Color.FromArgb(15, 15, 15) : Color.FromArgb(250, 250, 250);
-            Color thumbBorder = _lightTheme ? Color.FromArgb(255, 255, 255) : Color.FromArgb(12, 12, 12);
-
-            using (SolidBrush fill = new SolidBrush(thumbFill))
-            using (Pen pen = new Pen(thumbBorder, 2f))
-            {
-                g.FillEllipse(fill, thumbRect);
-                g.DrawEllipse(pen, thumbRect);
-            }
-        }
-    }
-
-    // Monochrome Segmented Pill Selector
-    public class OpacSegmentedSelector : Control
-    {
-        private string[] _items = new string[0];
-        private int _selectedIndex = 0;
-        private int _hoverIndex = -1;
-        private bool _lightTheme = false;
-
-        public event EventHandler SelectedIndexChanged;
-
-        public string[] Items
-        {
-            get { return _items; }
-            set { _items = value ?? new string[0]; Invalidate(); }
-        }
-
-        public int SelectedIndex
-        {
-            get { return _selectedIndex; }
-            set
-            {
-                int clamped = Math.Max(0, Math.Min(_items.Length - 1, value));
-                if (_selectedIndex != clamped)
-                {
-                    _selectedIndex = clamped;
-                    Invalidate();
-                    if (SelectedIndexChanged != null) SelectedIndexChanged(this, EventArgs.Empty);
-                }
-            }
-        }
-
-        public bool LightTheme
-        {
-            get { return _lightTheme; }
-            set { _lightTheme = value; Invalidate(); }
-        }
-
-        public OpacSegmentedSelector()
-        {
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
-                     ControlStyles.ResizeRedraw | ControlStyles.UserPaint | ControlStyles.SupportsTransparentBackColor, true);
-            BackColor = Color.Transparent;
-            Height = 34;
-            Cursor = Cursors.Hand;
-            Font = new Font("Segoe UI Semibold", 8.75f, FontStyle.Regular);
-        }
-
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            base.OnMouseMove(e);
-            if (_items.Length == 0) return;
-            int segWidth = Width / _items.Length;
-            int idx = Math.Max(0, Math.Min(_items.Length - 1, e.X / Math.Max(1, segWidth)));
-            if (idx != _hoverIndex)
-            {
-                _hoverIndex = idx;
-                Invalidate();
-            }
-        }
-
-        protected override void OnMouseLeave(EventArgs e)
-        {
-            base.OnMouseLeave(e);
-            _hoverIndex = -1;
-            Invalidate();
-        }
-
-        protected override void OnMouseDown(MouseEventArgs e)
-        {
-            base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Left && _items.Length > 0)
-            {
-                int segWidth = Width / _items.Length;
-                int idx = Math.Max(0, Math.Min(_items.Length - 1, e.X / Math.Max(1, segWidth)));
-                SelectedIndex = idx;
+                EventHandler h = DragRequested;
+                if (h != null) h(this, EventArgs.Empty);
             }
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
-            Rectangle outer = new Rectangle(0, 0, Width - 1, Height - 1);
-            Color outerBg = _lightTheme ? Color.FromArgb(236, 236, 236) : Color.FromArgb(24, 24, 24);
-            Color outerBorder = BrandTheme.GetBorder(_lightTheme);
-
-            using (GraphicsPath path = BrandTheme.CreateRoundedRect(outer, 7))
-            using (SolidBrush bg = new SolidBrush(outerBg))
-            using (Pen pen = new Pen(outerBorder, 1f))
-            {
-                g.FillPath(bg, path);
-                g.DrawPath(pen, path);
-            }
-
-            if (_items == null || _items.Length == 0) return;
-
-            float segW = (float)(Width - 6) / _items.Length;
-            for (int i = 0; i < _items.Length; i++)
-            {
-                Rectangle segRect = new Rectangle(
-                    3 + (int)Math.Round(i * segW),
-                    3,
-                    (int)Math.Round(segW),
-                    Height - 6);
-
-                bool isSelected = (i == _selectedIndex);
-                bool isHovered = (i == _hoverIndex && !isSelected);
-
-                if (isSelected)
-                {
-                    Color activeBg = _lightTheme ? Color.FromArgb(15, 15, 15) : Color.FromArgb(245, 245, 245);
-                    using (GraphicsPath segPath = BrandTheme.CreateRoundedRect(segRect, 5))
-                    using (SolidBrush activeBrush = new SolidBrush(activeBg))
-                    {
-                        g.FillPath(activeBrush, segPath);
-                    }
-                }
-                else if (isHovered)
-                {
-                    Color hoverBg = _lightTheme ? Color.FromArgb(224, 224, 224) : Color.FromArgb(36, 36, 36);
-                    using (GraphicsPath segPath = BrandTheme.CreateRoundedRect(segRect, 5))
-                    using (SolidBrush hoverBrush = new SolidBrush(hoverBg))
-                    {
-                        g.FillPath(hoverBrush, segPath);
-                    }
-                }
-
-                Color textColor;
-                if (isSelected)
-                {
-                    textColor = _lightTheme ? Color.FromArgb(250, 250, 250) : Color.FromArgb(12, 12, 12);
-                }
-                else
-                {
-                    textColor = BrandTheme.GetTextSecondary(_lightTheme);
-                }
-
-                TextRenderer.DrawText(
-                    g,
-                    _items[i],
-                    Font,
-                    segRect,
-                    textColor,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            }
+            Smooth(g);
+            int titleH = Theme.Px(24);
+            Gfx.Text(g, "Opacbar", Theme.Title, new Rectangle(0, 0, Width, titleH), Theme.Text, Theme.Surface,
+                TextFormatFlags.VerticalCenter);
+            int dotX = Theme.Px(4);
+            int lineH = Theme.Px(16);
+            int y = Height - lineH;
+            Gfx.FillCircle(g, _statusColor, dotX, y + lineH / 2f, Theme.PxF(8));
+            Gfx.Text(g, _status, Theme.Caption, new Rectangle(Theme.Px(16), y, Math.Max(0, Width - _toggle.Width - Theme.Px(24)), lineH),
+                Theme.TextSecondary, Theme.Surface, TextFormatFlags.VerticalCenter);
         }
     }
 
-    // Live Interactive Taskbar Visualizer Canvas
-    public class LiveTaskbarVisualizer : Control
+    // ------------------------------------------------------------------------------------
+    // Tray menu renderer (monochrome)
+    // ------------------------------------------------------------------------------------
+    public class MenuColors : ProfessionalColorTable
     {
-        private AppConfig _config;
-        private DynamicActivityState _previewState = DynamicActivityState.Desktop;
-
-        public LiveTaskbarVisualizer(AppConfig config)
-        {
-            _config = config;
-            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
-                     ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
-            Height = 96;
-        }
-
-        public void UpdatePreview(AppConfig config, DynamicActivityState state)
-        {
-            _config = config;
-            _previewState = state;
-            Invalidate();
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
-            bool light = _config != null && _config.UILightTheme;
-            Rectangle bounds = new Rectangle(0, 0, Width - 1, Height - 1);
-
-            // Simulated monochrome desktop wallpaper with geometric grid so transparency/blur is clearly visible
-            using (GraphicsPath cardPath = BrandTheme.CreateRoundedRect(bounds, 10))
-            {
-                g.SetClip(cardPath);
-
-                using (LinearGradientBrush wallBrush = new LinearGradientBrush(
-                    bounds,
-                    light ? Color.FromArgb(226, 226, 226) : Color.FromArgb(22, 22, 22),
-                    light ? Color.FromArgb(205, 205, 205) : Color.FromArgb(12, 12, 12),
-                    35f))
-                {
-                    g.FillRectangle(wallBrush, bounds);
-                }
-
-                // Subtle geometric grid lines on simulated desktop
-                using (Pen gridPen = new Pen(light ? Color.FromArgb(25, 0, 0, 0) : Color.FromArgb(22, 255, 255, 255), 1f))
-                {
-                    for (int x = 20; x < Width; x += 28)
-                        g.DrawLine(gridPen, x, 0, x, Height);
-                    for (int y = 16; y < Height; y += 24)
-                        g.DrawLine(gridPen, 0, y, Width, y);
-                }
-
-                // Decorative monochrome circles on simulated desktop so user can see glass/clear vs solid
-                using (SolidBrush orb1 = new SolidBrush(light ? Color.FromArgb(45, 20, 20, 20) : Color.FromArgb(40, 255, 255, 255)))
-                using (SolidBrush orb2 = new SolidBrush(light ? Color.FromArgb(30, 20, 20, 20) : Color.FromArgb(25, 255, 255, 255)))
-                {
-                    g.FillEllipse(orb1, Width / 2 - 70, 28, 54, 54);
-                    g.FillEllipse(orb2, Width / 2 + 25, 36, 42, 42);
-                }
-
-                // Label top-left: LIVE PREVIEW
-                using (Font badgeFont = new Font("Segoe UI Semibold", 7.5f, FontStyle.Bold))
-                {
-                    string previewTitle = "LIVE GEOMETRY & OPACITY PREVIEW";
-                    TextRenderer.DrawText(
-                        g,
-                        previewTitle,
-                        badgeFont,
-                        new Point(12, 9),
-                        light ? Color.FromArgb(90, 90, 90) : Color.FromArgb(150, 150, 150));
-                }
-
-                // Simulated Taskbar at bottom of preview
-                if (_config != null)
-                {
-                    StyleProfile prof = _config.DesktopProfile;
-                    if (_previewState == DynamicActivityState.MaximizedWindow && _config.EnableMaximizedState)
-                        prof = _config.MaximizedProfile;
-                    else if (_previewState == DynamicActivityState.StartOrSearchOpen && _config.EnableStartMenuState)
-                        prof = _config.StartMenuProfile;
-                    else if (_previewState == DynamicActivityState.BatterySaver && _config.EnableBatterySaverState)
-                        prof = _config.BatterySaverProfile;
-
-                    bool pill = _config.FloatingPillEnabled;
-                    int marginX = pill ? Math.Min(120, (int)Math.Round(_config.HorizontalMargin * 0.45) + 12) : 0;
-                    int marginY = pill ? Math.Min(10, _config.VerticalMargin + 4) : 0;
-                    int radius = pill ? Math.Min(17, (int)Math.Round(_config.CornerRadius * 0.55)) : 0;
-
-                    int barHeight = 32;
-                    Rectangle barRect = new Rectangle(
-                        marginX + 1,
-                        Height - barHeight - marginY - 1,
-                        Width - (marginX * 2) - 3,
-                        barHeight);
-
-                    int alpha = (int)Math.Round((prof.Opacity / 100.0) * 255.0);
-                    if (prof.Mode == TaskbarStyleMode.Clear) alpha = 0;
-                    else if (prof.Mode == TaskbarStyleMode.Solid) alpha = 255;
-                    else if (prof.Mode == TaskbarStyleMode.Normal) alpha = 230;
-
-                    int lum = prof.Luminance;
-                    Color barFill = Color.FromArgb(alpha, lum, lum, lum);
-
-                    using (GraphicsPath barPath = BrandTheme.CreateRoundedRect(barRect, radius))
-                    {
-                        if (alpha > 0)
-                        {
-                            using (SolidBrush bBrush = new SolidBrush(barFill))
-                            {
-                                g.FillPath(bBrush, barPath);
-                            }
-                        }
-
-                        // Simulated Acrylic noise/frosted sheen if Acrylic or Blur
-                        if (prof.Mode == TaskbarStyleMode.Acrylic || prof.Mode == TaskbarStyleMode.Blur)
-                        {
-                            using (HatchBrush hatch = new HatchBrush(
-                                HatchStyle.Percent20,
-                                Color.FromArgb(28, 255, 255, 255),
-                                Color.Transparent))
-                            {
-                                g.FillPath(hatch, barPath);
-                            }
-                        }
-
-                        // Subtle outline so even 100% Clear is visible in preview
-                        Color barStroke = prof.ShowTopLine
-                            ? Color.FromArgb(190, 240, 240, 240)
-                            : Color.FromArgb(75, 160, 160, 160);
-                        using (Pen strokePen = new Pen(barStroke, 1f))
-                        {
-                            g.DrawPath(strokePen, barPath);
-                        }
-                    }
-
-                    // Simulated centered taskbar app icons (monochrome squares/circles)
-                    int iconCount = 5;
-                    int iconSize = 12;
-                    int iconGap = 10;
-                    int totalIconsW = iconCount * iconSize + (iconCount - 1) * iconGap;
-                    int startX = barRect.X + (barRect.Width - totalIconsW) / 2;
-                    int iconY = barRect.Y + (barRect.Height - iconSize) / 2;
-
-                    Color iconColor = (lum > 150 && alpha > 120)
-                        ? Color.FromArgb(220, 20, 20, 20)
-                        : Color.FromArgb(235, 245, 245, 245);
-
-                    using (SolidBrush iconBrush = new SolidBrush(iconColor))
-                    {
-                        for (int i = 0; i < iconCount; i++)
-                        {
-                            Rectangle ic = new Rectangle(startX + i * (iconSize + iconGap), iconY, iconSize, iconSize);
-                            using (GraphicsPath icPath = BrandTheme.CreateRoundedRect(ic, 3))
-                            {
-                                g.FillPath(iconBrush, icPath);
-                            }
-                        }
-                    }
-                }
-
-                g.ResetClip();
-
-                using (Pen borderPen = new Pen(BrandTheme.GetBorder(light), 1f))
-                {
-                    g.DrawPath(borderPen, cardPath);
-                }
-            }
-        }
+        public MenuColors() { UseSystemColors = false; }
+        public override Color ToolStripDropDownBackground { get { return Theme.Surface; } }
+        public override Color ImageMarginGradientBegin { get { return Theme.Surface; } }
+        public override Color ImageMarginGradientMiddle { get { return Theme.Surface; } }
+        public override Color ImageMarginGradientEnd { get { return Theme.Surface; } }
+        public override Color MenuBorder { get { return Theme.Border; } }
+        public override Color MenuItemBorder { get { return Theme.Hover; } }
+        public override Color MenuItemSelected { get { return Theme.Hover; } }
+        public override Color MenuItemSelectedGradientBegin { get { return Theme.Hover; } }
+        public override Color MenuItemSelectedGradientEnd { get { return Theme.Hover; } }
+        public override Color SeparatorDark { get { return Theme.Border; } }
+        public override Color SeparatorLight { get { return Theme.Surface; } }
     }
 
-    internal static class DynamicStateExtensions
-    {
-        public static DynamicActivityState StartMenuProfile_Check(this DynamicActivityState s, DynamicActivityState current)
-        {
-            return DynamicActivityState.StartOrSearchOpen;
-        }
-    }
-
-    // Monochrome Context Menu Renderer for System Tray
     public class MonochromeMenuRenderer : ToolStripProfessionalRenderer
     {
-        private bool _light;
-
-        public MonochromeMenuRenderer(bool light)
+        public MonochromeMenuRenderer() : base(new MenuColors())
         {
-            _light = light;
+            RoundedEdges = false;
         }
 
         protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
         {
-            using (SolidBrush b = new SolidBrush(BrandTheme.GetBgCard(_light)))
-            {
-                e.Graphics.FillRectangle(b, e.AffectedBounds);
-            }
+            e.Graphics.Clear(Theme.Surface);
+        }
+
+        protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+        {
+            // flat: no separate margin column
         }
 
         protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
         {
-            using (Pen p = new Pen(BrandTheme.GetBorder(_light), 1f))
-            {
-                e.Graphics.DrawRectangle(p, 0, 0, e.AffectedBounds.Width - 1, e.AffectedBounds.Height - 1);
-            }
+            using (Pen p = new Pen(Theme.Border))
+                e.Graphics.DrawRectangle(p, 0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
         }
 
         protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
         {
-            Rectangle r = new Rectangle(4, 2, e.Item.Width - 8, e.Item.Height - 4);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = new Rectangle(Theme.Px(4), Theme.Px(1), e.Item.Width - 2 * Theme.Px(4), e.Item.Height - 2 * Theme.Px(1));
+            using (SolidBrush b = new SolidBrush(Theme.Surface))
+                g.FillRectangle(b, 0, 0, e.Item.Width, e.Item.Height);
             if (e.Item.Selected && e.Item.Enabled)
-            {
-                Color sel = _light ? Color.FromArgb(232, 232, 232) : Color.FromArgb(36, 36, 36);
-                using (GraphicsPath path = BrandTheme.CreateRoundedRect(r, 5))
-                using (SolidBrush b = new SolidBrush(sel))
-                {
-                    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                    e.Graphics.FillPath(b, path);
-                }
-            }
+                Gfx.FillRound(g, Theme.Hover, r, Theme.PxF(Theme.RadiusMenu));
         }
 
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
         {
-            e.TextColor = e.Item.Enabled
-                ? BrandTheme.GetTextPrimary(_light)
-                : BrandTheme.GetTextMuted(_light);
+            e.TextColor = e.Item.Enabled ? Theme.Text : Theme.TextDisabled;
             base.OnRenderItemText(e);
         }
 
-        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
         {
-            using (Pen p = new Pen(BrandTheme.GetBorder(_light), 1f))
-            {
-                int y = e.Item.Height / 2;
-                e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
-            }
+            e.ArrowColor = e.Item.Enabled ? Theme.TextSecondary : Theme.TextDisabled;
+            base.OnRenderArrow(e);
         }
 
         protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
         {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Rectangle r = new Rectangle(e.ImageRectangle.X + 3, e.ImageRectangle.Y + 3, 10, 10);
-            using (SolidBrush b = new SolidBrush(BrandTheme.AccentSuccess))
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle r = e.ImageRectangle;
+            float s = Math.Min(r.Width, r.Height);
+            float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f;
+            float u = Math.Max(4f, s * 0.28f);
+            using (Pen p = new Pen(Theme.Text, Math.Max(1.5f, Theme.PxF(1.6f))))
             {
-                e.Graphics.FillEllipse(b, r);
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                p.LineJoin = LineJoin.Round;
+                g.DrawLines(p, new PointF[] {
+                    new PointF(cx - u, cy + 0.05f * u),
+                    new PointF(cx - u * 0.35f, cy + u * 0.7f),
+                    new PointF(cx + u, cy - u * 0.65f) });
+            }
+        }
+
+        protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+        {
+            int y = e.Item.Height / 2;
+            using (Pen p = new Pen(Theme.Border))
+                e.Graphics.DrawLine(p, Theme.Px(8), y, e.Item.Width - Theme.Px(8), y);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // Tray icon: crisp monochrome pill glyph generated at the real icon size
+    // ------------------------------------------------------------------------------------
+    public static class IconFactory
+    {
+        public static Icon CreateTrayIcon(bool enabled)
+        {
+            int size = Math.Max(16, SystemInformation.SmallIconSize.Width);
+            Color ink = Theme.SystemTaskbarLight() ? Color.FromArgb(0x11, 0x11, 0x11) : Color.White;
+            using (Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.Clear(Color.Transparent);
+
+                    float stroke = Math.Max(1.5f, size / 12f);
+                    float x = size * 0.07f, w = size * 0.86f;
+                    float h = size * 0.46f, y = (size - h) / 2f;
+                    int a = enabled ? 255 : 120;
+                    Color c = Color.FromArgb(a, ink);
+                    RectangleF outer = new RectangleF(x, y, w, h);
+                    Gfx.StrokeRound(g, c, outer, h / 2f, stroke);
+                    if (enabled)
+                    {
+                        // Filled left half: reads as "bar with transparency".
+                        float inset = stroke + Math.Max(1f, size / 16f);
+                        float fh = h - 2 * inset;
+                        RectangleF fill = new RectangleF(x + inset, y + inset, (w - 2 * inset) * 0.5f, fh);
+                        Gfx.FillRound(g, c, fill, fh / 2f);
+                    }
+                }
+                IntPtr h2 = bmp.GetHicon();
+                try
+                {
+                    using (Icon tmp = Icon.FromHandle(h2))
+                        return (Icon)tmp.Clone();
+                }
+                finally
+                {
+                    NativeMethods.DestroyIcon(h2);
+                }
             }
         }
     }
 }
+
+

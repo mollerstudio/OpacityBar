@@ -1,14 +1,12 @@
 using System;
-using System.IO;
 using System.Text;
-using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Runtime.InteropServices;
 
 namespace Opacbar
 {
     public static class NativeMethods
     {
+        // ---- windows ----
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
@@ -20,14 +18,11 @@ namespace Opacbar
         [DllImport("user32.dll")]
         public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
 
-        [DllImport("user32.dll")]
-        public static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
-        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
         [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
@@ -44,78 +39,20 @@ namespace Opacbar
         [DllImport("user32.dll")]
         public static extern bool IsIconic(IntPtr hWnd);
 
-        [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
-        public static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
-
-        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr")]
-        public static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
-
-        public static long GetWindowLongPtr(IntPtr hWnd, int nIndex)
-        {
-            if (IntPtr.Size == 8)
-                return GetWindowLongPtr64(hWnd, nIndex).ToInt64();
-            else
-                return GetWindowLong32(hWnd, nIndex);
-        }
-
-        [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
-        public static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
-
-        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
-        public static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
-
-        public static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, long dwNewLong)
-        {
-            if (IntPtr.Size == 8)
-                return SetWindowLongPtr64(hWnd, nIndex, new IntPtr(dwNewLong));
-            else
-                return new IntPtr(SetWindowLong32(hWnd, nIndex, (int)dwNewLong));
-        }
-
         [DllImport("user32.dll")]
-        public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
-
-        [DllImport("user32.dll")]
-        public static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
-
-        [DllImport("user32.dll")]
-        public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
-
-        [DllImport("gdi32.dll")]
-        public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int cx, int cy);
-
-        [DllImport("gdi32.dll")]
-        public static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
-
-        [DllImport("gdi32.dll")]
-        public static extern bool DeleteObject(IntPtr hObject);
-
-        [DllImport("dwmapi.dll")]
-        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
-
-        [DllImport("dwmapi.dll")]
-        public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
-
-        [DllImport("dwmapi.dll")]
-        public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out RECT pvAttribute, int cbAttribute);
-
-        [DllImport("dwmapi.dll")]
-        public static extern int DwmExtendFrameIntoClientArea(IntPtr hWnd, ref MARGINS pMarInset);
-
-        [DllImport("user32.dll")]
-        public static extern bool SetProcessDPIAware();
+        public static extern uint GetDpiForWindow(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto)]
-        public static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
         [DllImport("user32.dll")]
         public static extern bool InvalidateRect(IntPtr hWnd, IntPtr lpRect, bool bErase);
 
         [DllImport("user32.dll")]
-        public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+        public static extern bool SetProcessDPIAware();
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
         public static extern bool ReleaseCapture();
@@ -123,22 +60,105 @@ namespace Opacbar
         [DllImport("user32.dll")]
         public static extern IntPtr SendMessage(IntPtr hWnd, int Msg, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, IntPtr lParam,
+            uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         public static extern bool DestroyIcon(IntPtr handle);
 
-        public const int GWL_STYLE = -16;
-        public const int GWL_EXSTYLE = -20;
-        public const long WS_EX_LAYERED = 0x00080000L;
-        public const long WS_EX_TOOLWINDOW = 0x00000080L;
-        public const long WS_POPUP = 0x80000000L;
-        public const uint LWA_COLORKEY = 0x00000001;
-        public const uint LWA_ALPHA = 0x00000002;
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll")]
+        public static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
+
+        [DllImport("user32.dll")]
+        public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
+
+        [DllImport("user32.dll")]
+        public static extern int GetWindowRgn(IntPtr hWnd, IntPtr hRgn);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetDC(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+
+        // ---- gdi ----
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int cx, int cy);
+
+        [DllImport("gdi32.dll")]
+        public static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
+
+        [DllImport("gdi32.dll")]
+        public static extern int GetRgnBox(IntPtr hrgn, out RECT lprc);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool DeleteObject(IntPtr hObject);
+
+        [DllImport("gdi32.dll")]
+        public static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
+
+        // ---- dwm ----
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        [DllImport("dwmapi.dll")]
+        public static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
+        // ---- processes / system ----
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref int lpdwSize);
+
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool IsWow64Process2(IntPtr hProcess, out ushort pProcessMachine, out ushort pNativeMachine);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetSystemPowerStatus(out SYSTEM_POWER_STATUS lpSystemPowerStatus);
+
+        [DllImport("ntdll.dll")]
+        public static extern int RtlGetVersion(ref OSVERSIONINFOEX lpVersionInformation);
+
+        [DllImport("Windows.UI.Xaml.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        public static extern int InitializeXamlDiagnosticsEx(
+            [MarshalAs(UnmanagedType.LPWStr)] string endPointName,
+            uint pid,
+            [MarshalAs(UnmanagedType.LPWStr)] string wszDllXamlDiagnostics,
+            [MarshalAs(UnmanagedType.LPWStr)] string wszTAPDllName,
+            Guid tapClsid,
+            [MarshalAs(UnmanagedType.LPWStr)] string wszInitializationData);
+
+        // ---- constants ----
+        public const int WM_HOTKEY = 0x0312;
+        public const uint MOD_ALT = 0x0001;
+        public const uint MOD_CONTROL = 0x0002;
+        public const uint MOD_SHIFT = 0x0004;
+        public const uint VK_Q = 0x51;
+
+        public const int SW_HIDE = 0;
+        public const int SW_SHOWNOACTIVATE = 4;
+
+        public const int LOGPIXELSX = 88;
+        public const int LOGPIXELSY = 90;
 
         public const uint MONITOR_DEFAULTTONULL = 0x00000000;
         public const uint MONITOR_DEFAULTTOPRIMARY = 0x00000001;
         public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
 
-        public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
         public const int DWMWA_CLOAKED = 14;
         public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
         public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
@@ -148,6 +168,15 @@ namespace Opacbar
         public const int WM_NCLBUTTONDOWN = 0xA1;
         public const int HT_CAPTION = 0x2;
 
+        public const uint SMTO_ABORTIFHUNG = 0x0002;
+        public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+        public static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
+
+        public const ushort IMAGE_FILE_MACHINE_AMD64 = 0x8664;
+        public const ushort IMAGE_FILE_MACHINE_ARM64 = 0xAA64;
+
+        // ---- structs ----
         [StructLayout(LayoutKind.Sequential)]
         public struct RECT
         {
@@ -161,21 +190,31 @@ namespace Opacbar
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        public struct MARGINS
+        public struct SYSTEM_POWER_STATUS
         {
-            public int cxLeftWidth;
-            public int cxRightWidth;
-            public int cyTopHeight;
-            public int cyBottomHeight;
+            public byte ACLineStatus;
+            public byte BatteryFlag;
+            public byte BatteryLifePercent;
+            public byte SystemStatusFlag; // 1 = battery saver on
+            public uint BatteryLifeTime;
+            public uint BatteryFullLifeTime;
         }
 
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        public struct MONITORINFO
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct OSVERSIONINFOEX
         {
-            public int cbSize;
-            public RECT rcMonitor;
-            public RECT rcWork;
-            public uint dwFlags;
+            public int dwOSVersionInfoSize;
+            public int dwMajorVersion;
+            public int dwMinorVersion;
+            public int dwBuildNumber;
+            public int dwPlatformId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string szCSDVersion;
+            public ushort wServicePackMajor;
+            public ushort wServicePackMinor;
+            public ushort wSuiteMask;
+            public byte wProductType;
+            public byte wReserved;
         }
 
         [StructLayout(LayoutKind.Sequential)]

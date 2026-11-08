@@ -1,105 +1,101 @@
-# OPACBAR (Opac)
+# Opacbar
 
-**Modern Minimal Monochrome Taskbar Customizer & Floating Pill Studio for Windows 10 & 11.**
+A small, open-source taskbar customizer for Windows 11 (and 10). An alternative to TranslucentTB with a monochrome UI and a floating "pill" taskbar.
 
-Opacbar is an open-source, zero-telemetry, zero-permission standalone replacement for TranslucentTB—engineered with a strict **black-and-white monochrome UI**, **floating pill geometry with adjustable corner radius**, and **100% transparent code** with zero sketchy permissions.
-
----
-
-## Why Opacbar?
-
-Many taskbar utilities require bloated store frameworks, background services, invasive permissions, or complex config file editing. **Opacbar** was built from the ground up around three principles:
-
-1. **Full Privacy & Zero Sketchy Permissions**
-   - **Zero network calls**: No `HttpClient`, no sockets, no analytics, no auto-updater phoning home.
-   - **Standard user privileges (`asInvoker`)**: Never asks for Administrator UAC elevation.
-   - **No DLL injection**: Uses standard user-mode Win32 & DWM window attributes (`SetWindowCompositionAttribute`, `SetWindowRgn`, `DwmSetWindowAttribute`) and cleanly restores your default Windows taskbar the instant you exit.
-2. **Floating Pill & Custom Corner Geometry**
-   - Turn your taskbar into a **floating pill dock** or keep it full-width.
-   - Adjust **Corner Radius** in real time from `0px` (sharp square) to `8px` (soft), `16px` (rounded), or `26px–32px` (full pill).
-   - Adjust **Horizontal Edge Inset** (pill width) and **Vertical Floating Gap** with live sliders.
-   - Optionally auto-expand the floating pill back to a full-width bar when any window is maximized.
-3. **Effortless Visual UI/UX (No Config Coding Required)**
-   - **Left-click** the system tray icon to open **Opacbar Studio**—a modern minimal monochrome control panel with an interactive **Live Taskbar Preview Canvas**.
-   - **Right-click** the system tray icon for one-click access to modes (`Clear`, `Acrylic`, `Blur`, `Tinted`, `Solid`, `Normal`) and corner presets (`Square`, `Soft`, `Rounded`, `Full Pill`).
-   - Strictly monochromatic black-and-white aesthetic (`#0A0A0A` / `#FAFAFA`), using only semantic status dots:
-     - **Green (`#22C55E`)**: Active / Verified Safe
-     - **Yellow (`#EAB308`)**: Paused
-     - **Red (`#EF4444`)**: Error / Alert
+Opacbar is a single portable `.exe` plus a tiny helper DLL. No installer, no admin rights, no network access.
 
 ---
 
-## Features at a Glance
+## Features
 
-| Feature | TranslucentTB | **Opacbar** |
-| :--- | :---: | :---: |
-| **Clear / Transparent Taskbar** | Yes | **Yes** |
-| **Acrylic & Frosted Blur Glass** | Yes | **Yes** |
-| **Monochrome Opacity & Shade Sliders** | Color Picker | **Precision Monochrome Luminance & Opacity Sliders** |
-| **Dynamic States (Maximized / Start / Battery Saver)** | Yes | **Yes (Visual Rule Editor)** |
-| **Floating Pill Taskbar** | No | **Yes (Adjustable Horizontal & Vertical Margins)** |
-| **Adjustable Corner Radius (Square ↔ Rounded ↔ Pill)** | No | **Yes (0px to 32px Slider + Quick Presets)** |
-| **Interactive Live Preview Canvas** | No | **Yes** |
-| **Zero Network / Zero Telemetry / Single `.exe`** | Store Package | **100% Standalone ~45 KB `.exe`** |
+- **Taskbar looks:** Clear, Tint, Blur, Acrylic, Solid, or Windows default.
+- **True transparency on Windows 11:** only the taskbar's background is recolored, so icons, text and the clock stay fully opaque. A completely clear (alpha 0) background is possible.
+- **Floating pill:** detach the taskbar from the screen edge with adjustable corner radius, side insets and bottom gap.
+- **Per-situation looks:** use a different look when an app is maximized, when Start is open, or when battery saver is on.
+- **Tray icon:** left-click opens settings, right-click opens a quick menu.
+- **Emergency quit:** `Ctrl+Shift+Alt+Q` quits Opacbar and restores the stock taskbar.
+- Restores the normal Windows taskbar when it exits.
 
 ---
 
-## Building on GitHub (Automated CI/CD)
+## Privacy and how it works
 
-This repository includes a ready-to-run GitHub Actions workflow at [`.github/workflows/build.yml`](.github/workflows/build.yml):
+Opacbar has nothing to hide, and the full source is in this repository.
 
-1. Push this repository to GitHub.
-2. On every push to `main`/`master` (or when you trigger **Actions → Build Opacbar Standalone Executable**), GitHub Actions automatically compiles `Opacbar.exe` and packages `Opacbar-Windows-Portable.zip` with SHA-256 checksums.
-3. Download the compiled `Opacbar-Windows-Standalone` artifact directly from the **Actions** tab, or push a version tag (e.g., `git tag v1.0.0 && git push --tags`) to automatically publish a **GitHub Release** with `Opacbar.exe` attached.
+- **No admin.** Runs as a normal user (`asInvoker`).
+- **No network.** No telemetry, analytics, update checks or downloads.
+- **Local config only.** Settings are a JSON file (`opacbar.config.json` next to the exe, or in `%AppData%\Opacbar`). "Start with Windows" adds a value under `HKCU\...\CurrentVersion\Run` only if you turn it on.
+
+**The helper DLL.** On Windows 11 the taskbar is drawn with XAML inside `explorer.exe`, and its background can't be changed from outside. To recolor it, Opacbar loads a small open-source helper, [`native/OpacbarTAP.cpp`](native/OpacbarTAP.cpp), into Explorer through Microsoft's official **XAML Diagnostics API** (`InitializeXamlDiagnosticsEx`). Visual Studio's Live Visual Tree and TranslucentTB use the same API. Because this loads code into another process, some antivirus tools may flag it.
+
+The helper:
+
+- finds the taskbar's background rectangles (`BackgroundFill` / `BackgroundStroke` inside `TaskbarBackground`) and changes **only their fill color**;
+- takes commands from Opacbar through an invisible message-only window (`OpacbarTAP.Sink`) using three messages: set color, restore, and ping;
+- puts the original Windows brush back when asked to restore;
+- does **not** use the network, write files or the registry, hook the keyboard or mouse, or read anything Explorer displays.
+
+The top of the source file explains this in plain English. The helper is a single, heavily commented C++ file of plain Win32 and COM, so you can audit it in one sitting.
+
+Opacbar copies the helper to `%LocalAppData%\Opacbar\helper` before loading it, so the original next to the exe is never locked. The helper stays loaded until Explorer restarts. Restarting Explorer or signing out removes it completely.
+
+Floating pill geometry and the blur/acrylic effects use standard Win32/DWM window APIs and do not need the helper. If the helper is missing, everything else still works.
 
 ---
 
-## Building Locally on Any Windows PC (Zero Dependencies)
+## Download
 
-You do **not** need to install Visual Studio or heavy SDKs to build Opacbar on your PC. Every Windows 10 and Windows 11 installation includes the built-in .NET Framework compiler (`csc.exe`).
+Get `Opacbar-Windows-Portable.zip` from [Releases](../../releases) (or the latest **Actions** run). It contains:
 
-Double-click **`build.bat`** or run in PowerShell:
+| File | Purpose |
+| :--- | :--- |
+| `Opacbar.exe` | The app (.NET Framework 4.8, built into Windows) |
+| `OpacbarTAP.x64.dll` | Taskbar helper for x64 PCs |
+| `OpacbarTAP.arm64.dll` | Taskbar helper for ARM64 PCs |
+| `SHA256SUMS.txt` | Checksums for the three binaries |
+
+Keep the DLLs in the same folder as `Opacbar.exe`.
+
+---
+
+## Building
+
+### Opacbar.exe
+
+No Visual Studio needed. Windows ships the .NET Framework C# compiler (`csc.exe`):
 
 ```powershell
-.\build.ps1
+.\build.ps1        # or double-click build.bat
 ```
 
-This outputs the standalone executable to:
+Output: `dist\Opacbar.exe`.
 
-```text
-dist\Opacbar.exe
-```
+### Helper DLL
 
-If you prefer using the `.NET SDK` (`dotnet`) or Visual Studio, [`Opacbar.csproj`](Opacbar.csproj) is also included:
+GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds both DLLs with MSVC on every push. To build locally, install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022) with the C++ workload (and the ARM64 build tools for ARM64). Then, from a *Developer PowerShell* for the target architecture, run:
 
 ```powershell
-dotnet build Opacbar.csproj -c Release -o dist
+cl /nologo /LD /O2 /EHs-c- /D_HAS_EXCEPTIONS=0 /GS /guard:cf /W4 /DUNICODE /D_UNICODE `
+   native\OpacbarTAP.cpp /Fe:dist\OpacbarTAP.x64.dll `
+   /link /DEF:native\OpacbarTAP.def /GUARD:CF ole32.lib oleaut32.lib user32.lib
 ```
+
+For ARM64, use an `amd64_arm64` (or native arm64) developer prompt and name the output `OpacbarTAP.arm64.dll`.
 
 ---
 
-## Project Structure
+## Project layout
 
 ```text
-├── .github/workflows/
-│   └── build.yml            # Automated GitHub Actions build & release pipeline
-├── src/
-│   ├── Program.cs           # Entry point, single-instance mutex & system tray menu
-│   ├── SettingsForm.cs      # Monochrome Opacbar Studio UI & 4-tab visual editor
-│   ├── ThemeAndControls.cs  # Custom monochrome switches, sliders, segmented controls & live preview
-│   ├── TaskbarEngine.cs     # Multi-monitor Win32/DWM transparency, acrylic & pill region engine
-│   ├── AppConfig.cs         # Portable JSON persistence & Windows startup registry helper
-│   ├── NativeMethods.cs     # Audited P/Invoke signatures (user32, dwmapi, gdi32)
-│   ├── AssemblyInfo.cs      # Binary metadata
-│   └── app.manifest         # Standard user privilege (asInvoker) & PerMonitorV2 DPI awareness
-├── Opacbar.csproj           # SDK-style C# project file
-├── build.ps1                # Zero-dependency PowerShell build script
-├── build.bat                # One-click Windows batch build launcher
-└── LICENSE                  # MIT License
+src/                  C# WinForms app (tray, settings UI, taskbar engine, helper loader)
+native/OpacbarTAP.cpp Explorer helper (XAML Diagnostics TAP), single file
+native/OpacbarTAP.def DLL exports
+build.ps1 / build.bat Builds Opacbar.exe with the built-in csc
+.github/workflows/    CI: exe + x64/ARM64 helper, checksums, portable zip, releases
 ```
 
 ---
 
 ## License
 
-Released under the [MIT License](LICENSE).
+[MIT](LICENSE)

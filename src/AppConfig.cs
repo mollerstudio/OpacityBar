@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
@@ -19,14 +20,14 @@ namespace Opacbar
     {
         public TaskbarStyleMode Mode { get; set; }
         public int Opacity { get; set; } // 0 - 100
-        public int Luminance { get; set; } // 0 (Pure Black) - 255 (Pure White)
+        public int Luminance { get; set; } // 0 (black) - 255 (white)
         public bool ShowTopLine { get; set; }
 
         public StyleProfile()
         {
             Mode = TaskbarStyleMode.Clear;
-            Opacity = 35;
-            Luminance = 10;
+            Opacity = 0;
+            Luminance = 0;
             ShowTopLine = false;
         }
 
@@ -39,6 +40,13 @@ namespace Opacbar
                 Luminance = this.Luminance,
                 ShowTopLine = this.ShowTopLine
             };
+        }
+
+        public void Clamp()
+        {
+            Opacity = Math.Max(0, Math.Min(100, Opacity));
+            Luminance = Math.Max(0, Math.Min(255, Luminance));
+            if (!Enum.IsDefined(typeof(TaskbarStyleMode), Mode)) Mode = TaskbarStyleMode.Clear;
         }
 
         public uint ToAbgrColor()
@@ -62,35 +70,29 @@ namespace Opacbar
             int lum = Math.Max(0, Math.Min(255, Luminance));
 
             uint a = (uint)alpha;
-            uint b = (uint)lum;
-            uint g = (uint)lum;
-            uint r = (uint)lum;
+            uint c = (uint)lum;
 
-            return (a << 24) | (b << 16) | (g << 8) | r;
+            return (a << 24) | (c << 16) | (c << 8) | c;
         }
-    }
-
-    public enum PillWidthPreset
-    {
-        FullBar = 0,
-        WideMargin = 1,
-        CompactPill = 2,
-        CustomMargin = 3
     }
 
     public class AppConfig
     {
-        // Master Toggle
+        public const int CurrentVersion = 3;
+
+        public int ConfigVersion { get; set; }
+
+        // Master toggle
         public bool Enabled { get; set; }
 
-        // Floating Pill & Geometry
+        // Floating bar and geometry
         public bool FloatingPillEnabled { get; set; }
-        public int CornerRadius { get; set; } // 0 (Square) to 32 (Full Pill)
-        public int HorizontalMargin { get; set; } // px from left and right edges (0 to 500)
-        public int VerticalMargin { get; set; } // px from top and bottom of taskbar (0 to 12)
-        public bool DockedWhenMaximized { get; set; } // Expand pill to full square bar when window is maximized
+        public int CornerRadius { get; set; }      // 0 - 24 px
+        public int HorizontalMargin { get; set; }  // 0 - 64 px, side gap
+        public int VerticalMargin { get; set; }    // 0 - 12 px, bottom gap
+        public bool DockedWhenMaximized { get; set; }
 
-        // Dynamic State Profiles
+        // Situation profiles
         public StyleProfile DesktopProfile { get; set; }
         public bool EnableMaximizedState { get; set; }
         public StyleProfile MaximizedProfile { get; set; }
@@ -99,25 +101,31 @@ namespace Opacbar
         public bool EnableBatterySaverState { get; set; }
         public StyleProfile BatterySaverProfile { get; set; }
 
-        // App Preferences
-        public bool UILightTheme { get; set; } // False = Pure Monochrome Dark, True = Pure Monochrome Light
+        // App preferences
+        public int UiTheme { get; set; }           // 0 = follow Windows, 1 = dark, 2 = light
+        public bool UILightTheme { get; set; }     // legacy (v2), migrated into UiTheme on load
         public bool LaunchAtStartup { get; set; }
         public int RefreshRateMs { get; set; }
 
+        /// <summary>True when Load() found no settings file (first launch).</summary>
+        public static bool IsFirstRun { get; private set; }
+
         public AppConfig()
         {
+            ConfigVersion = CurrentVersion;
             Enabled = true;
+
             FloatingPillEnabled = false;
             CornerRadius = 16;
-            HorizontalMargin = 14;
+            HorizontalMargin = 8;
             VerticalMargin = 4;
             DockedWhenMaximized = true;
 
             DesktopProfile = new StyleProfile
             {
                 Mode = TaskbarStyleMode.Clear,
-                Opacity = 25,
-                Luminance = 8,
+                Opacity = 0,
+                Luminance = 0,
                 ShowTopLine = false
             };
 
@@ -125,8 +133,8 @@ namespace Opacbar
             MaximizedProfile = new StyleProfile
             {
                 Mode = TaskbarStyleMode.Acrylic,
-                Opacity = 75,
-                Luminance = 8,
+                Opacity = 70,
+                Luminance = 16,
                 ShowTopLine = false
             };
 
@@ -134,8 +142,8 @@ namespace Opacbar
             StartMenuProfile = new StyleProfile
             {
                 Mode = TaskbarStyleMode.Acrylic,
-                Opacity = 65,
-                Luminance = 12,
+                Opacity = 70,
+                Luminance = 16,
                 ShowTopLine = false
             };
 
@@ -143,60 +151,119 @@ namespace Opacbar
             BatterySaverProfile = new StyleProfile
             {
                 Mode = TaskbarStyleMode.Solid,
-                Opacity = 95,
-                Luminance = 5,
+                Opacity = 100,
+                Luminance = 8,
                 ShowTopLine = false
             };
 
+            UiTheme = 0;
             UILightTheme = false;
             LaunchAtStartup = false;
-            RefreshRateMs = 50;
+            RefreshRateMs = 250;
+        }
+
+        /// <summary>Copies every setting from another config into this instance (keeps object identity).</summary>
+        public void CopyFrom(AppConfig o)
+        {
+            ConfigVersion = o.ConfigVersion;
+            Enabled = o.Enabled;
+            FloatingPillEnabled = o.FloatingPillEnabled;
+            CornerRadius = o.CornerRadius;
+            HorizontalMargin = o.HorizontalMargin;
+            VerticalMargin = o.VerticalMargin;
+            DockedWhenMaximized = o.DockedWhenMaximized;
+            DesktopProfile = o.DesktopProfile.Clone();
+            EnableMaximizedState = o.EnableMaximizedState;
+            MaximizedProfile = o.MaximizedProfile.Clone();
+            EnableStartMenuState = o.EnableStartMenuState;
+            StartMenuProfile = o.StartMenuProfile.Clone();
+            EnableBatterySaverState = o.EnableBatterySaverState;
+            BatterySaverProfile = o.BatterySaverProfile.Clone();
+            UiTheme = o.UiTheme;
+            UILightTheme = o.UILightTheme;
+            LaunchAtStartup = o.LaunchAtStartup;
+            RefreshRateMs = o.RefreshRateMs;
+        }
+
+        public void Clamp()
+        {
+            CornerRadius = Math.Max(0, Math.Min(24, CornerRadius));
+            HorizontalMargin = Math.Max(0, Math.Min(64, HorizontalMargin));
+            VerticalMargin = Math.Max(0, Math.Min(12, VerticalMargin));
+            if (UiTheme < 0 || UiTheme > 2) UiTheme = 0;
+            if (RefreshRateMs < 50) RefreshRateMs = 50;
+            if (RefreshRateMs > 5000) RefreshRateMs = 5000;
+            if (DesktopProfile == null) DesktopProfile = new AppConfig().DesktopProfile;
+            if (MaximizedProfile == null) MaximizedProfile = new AppConfig().MaximizedProfile;
+            if (StartMenuProfile == null) StartMenuProfile = new AppConfig().StartMenuProfile;
+            if (BatterySaverProfile == null) BatterySaverProfile = new AppConfig().BatterySaverProfile;
+            DesktopProfile.Clamp();
+            MaximizedProfile.Clamp();
+            StartMenuProfile.Clamp();
+            BatterySaverProfile.Clamp();
+        }
+
+        // ---- Storage ---------------------------------------------------------------
+
+        private static string ExeDirectory()
+        {
+            return AppDomain.CurrentDomain.BaseDirectory;
+        }
+
+        /// <summary>Portable mode is on only when a file named "portable" sits next to the exe.</summary>
+        public static bool IsPortable()
+        {
+            try { return File.Exists(Path.Combine(ExeDirectory(), "portable")); }
+            catch { return false; }
         }
 
         public static string GetConfigPath()
         {
-            string localConfig = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "opacbar.config.json");
-            try
+            if (IsPortable())
             {
-                // Prefer portable local config in app folder if writable
-                string testFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".write_test");
-                File.WriteAllText(testFile, "1");
-                File.Delete(testFile);
-                return localConfig;
+                return Path.Combine(ExeDirectory(), "settings.json");
             }
-            catch
-            {
-                string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Opacbar");
-                if (!Directory.Exists(appData)) Directory.CreateDirectory(appData);
-                return Path.Combine(appData, "opacbar.config.json");
-            }
+            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Opacbar");
+            return Path.Combine(dir, "settings.json");
         }
 
         public static AppConfig Load()
         {
+            AppConfig result = null;
+            IsFirstRun = true;
             try
             {
                 string path = GetConfigPath();
                 if (File.Exists(path))
                 {
-                    string json = File.ReadAllText(path);
+                    IsFirstRun = false;
                     JavaScriptSerializer serializer = new JavaScriptSerializer();
-                    AppConfig loaded = serializer.Deserialize<AppConfig>(json);
-                    if (loaded != null)
-                    {
-                        if (loaded.DesktopProfile == null) loaded.DesktopProfile = new StyleProfile();
-                        if (loaded.MaximizedProfile == null) loaded.MaximizedProfile = new StyleProfile { Mode = TaskbarStyleMode.Acrylic, Opacity = 75, Luminance = 8 };
-                        if (loaded.StartMenuProfile == null) loaded.StartMenuProfile = new StyleProfile { Mode = TaskbarStyleMode.Acrylic, Opacity = 65, Luminance = 12 };
-                        if (loaded.BatterySaverProfile == null) loaded.BatterySaverProfile = new StyleProfile { Mode = TaskbarStyleMode.Solid, Opacity = 95, Luminance = 5 };
-                        loaded.LaunchAtStartup = IsStartupEnabled();
-                        return loaded;
-                    }
+                    result = serializer.Deserialize<AppConfig>(File.ReadAllText(path));
                 }
             }
             catch
             {
+                result = null;
             }
-            return new AppConfig();
+
+            if (result == null)
+            {
+                result = new AppConfig();
+            }
+            else
+            {
+                if (result.ConfigVersion < 3)
+                {
+                    // v2 -> v3: boolean light theme flag became the UiTheme choice.
+                    if (result.UILightTheme) result.UiTheme = 2;
+                    result.UILightTheme = false;
+                    result.ConfigVersion = CurrentVersion;
+                }
+                result.Clamp();
+            }
+
+            result.LaunchAtStartup = IsStartupEnabled();
+            return result;
         }
 
         public bool Save(out string error)
@@ -204,10 +271,17 @@ namespace Opacbar
             error = null;
             try
             {
+                Clamp();
                 string path = GetConfigPath();
+                string dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
                 JavaScriptSerializer serializer = new JavaScriptSerializer();
                 string json = FormatJson(serializer.Serialize(this));
-                File.WriteAllText(path, json);
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, json, new UTF8Encoding(false));
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(tmp, path);
                 SetStartup(this.LaunchAtStartup);
                 return true;
             }
@@ -218,6 +292,8 @@ namespace Opacbar
             }
         }
 
+        // ---- Start with Windows ------------------------------------------------------
+
         private const string RunRegistryPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
         private const string AppRegistryName = "Opacbar";
 
@@ -227,11 +303,7 @@ namespace Opacbar
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryPath, false))
                 {
-                    if (key != null)
-                    {
-                        object val = key.GetValue(AppRegistryName);
-                        return val != null;
-                    }
+                    if (key != null) return key.GetValue(AppRegistryName) != null;
                 }
             }
             catch { }
@@ -244,18 +316,18 @@ namespace Opacbar
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryPath, true))
                 {
-                    if (key != null)
+                    if (key == null) return;
+                    if (enable)
                     {
-                        if (enable)
-                        {
-                            string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                            key.SetValue(AppRegistryName, "\"" + exePath + "\" --minimized");
-                        }
-                        else
-                        {
-                            if (key.GetValue(AppRegistryName) != null)
-                                key.DeleteValue(AppRegistryName, false);
-                        }
+                        string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                        string wanted = "\"" + exePath + "\" --minimized";
+                        object cur = key.GetValue(AppRegistryName);
+                        if (cur == null || !string.Equals(cur.ToString(), wanted, StringComparison.OrdinalIgnoreCase))
+                            key.SetValue(AppRegistryName, wanted);
+                    }
+                    else if (key.GetValue(AppRegistryName) != null)
+                    {
+                        key.DeleteValue(AppRegistryName, false);
                     }
                 }
             }
@@ -266,7 +338,7 @@ namespace Opacbar
         {
             int indent = 0;
             bool quoted = false;
-            var sb = new System.Text.StringBuilder();
+            StringBuilder sb = new StringBuilder();
             for (int i = 0; i < json.Length; i++)
             {
                 char ch = json[i];

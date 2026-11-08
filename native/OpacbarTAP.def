@@ -1,0 +1,5 @@
+; Exports for OpacbarTAP.<arch>.dll - the only two entry points the XAML Diagnostics
+; loader (InitializeXamlDiagnosticsEx) needs to create our TAP object.
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow   PRIVATE

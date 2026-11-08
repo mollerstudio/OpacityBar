@@ -1,4 +1,4 @@
-name: Build Opacbar Standalone Executable
+name: Build Opacbar
 
 on:
   push:
@@ -11,14 +11,75 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  build:
-    name: Build Windows Standalone (.exe)
+  # ---------------------------------------------------------------------------
+  # Native helper (native/OpacbarTAP.cpp) for x64 and ARM64, built with MSVC.
+  # ---------------------------------------------------------------------------
+  helper:
+    name: Build OpacbarTAP (${{ matrix.arch }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            msvc: x64
+            machine: 8664
+          - arch: arm64
+            msvc: amd64_arm64
+            machine: AA64
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Set up MSVC (${{ matrix.msvc }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc }}
+
+      - name: Compile OpacbarTAP.${{ matrix.arch }}.dll
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out, obj | Out-Null
+          $dll = "out/OpacbarTAP.${{ matrix.arch }}.dll"
+          cl /nologo /LD /O2 /EHs-c- /D_HAS_EXCEPTIONS=0 /GS /guard:cf /W4 `
+             /DUNICODE /D_UNICODE /Foobj\ native\OpacbarTAP.cpp /Fe:$dll `
+             /link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT `
+             ole32.lib oleaut32.lib user32.lib
+          if ($LASTEXITCODE -ne 0) { throw "cl failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path $dll)) { throw "$dll was not generated!" }
+
+          # Sanity checks: correct machine type and exactly the two expected exports.
+          $headers = dumpbin /nologo /headers $dll | Out-String
+          if ($headers -notmatch "${{ matrix.machine }} machine") { Write-Host $headers; throw "Unexpected machine type" }
+          $exports = dumpbin /nologo /exports $dll | Out-String
+          Write-Host $exports
+          foreach ($e in 'DllGetClassObject', 'DllCanUnloadNow') {
+            if ($exports -notmatch "\b$e\b") { throw "Missing export $e" }
+          }
+
+      - name: Upload helper DLL
+        uses: actions/upload-artifact@v5
+        with:
+          name: OpacbarTAP-${{ matrix.arch }}
+          path: out/OpacbarTAP.${{ matrix.arch }}.dll
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Opacbar.exe (built-in .NET Framework csc via build.ps1) + packaging/release.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build and package Opacbar
+    runs-on: windows-latest
+    needs: helper
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
 
       - name: Compile Opacbar.exe
         shell: pwsh
@@ -27,23 +88,41 @@ jobs:
           if (-not (Test-Path "dist/Opacbar.exe")) {
             throw "dist/Opacbar.exe was not generated!"
           }
-          $hash = (Get-FileHash "dist/Opacbar.exe" -Algorithm SHA256).Hash
-          "SHA256: $hash  Opacbar.exe" | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding utf8
-          Get-Content "dist/SHA256SUMS.txt"
 
-      - name: Package Portable Release ZIP
+      - name: Download helper DLLs
+        uses: actions/download-artifact@v5
+        with:
+          pattern: OpacbarTAP-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums and portable ZIP
         shell: pwsh
         run: |
+          $files = "Opacbar.exe", "OpacbarTAP.x64.dll", "OpacbarTAP.arm64.dll"
+          foreach ($f in $files) {
+            if (-not (Test-Path "dist/$f")) { throw "dist/$f is missing!" }
+          }
+          $lines = foreach ($f in $files) {
+            "{0}  {1}" -f (Get-FileHash "dist/$f" -Algorithm SHA256).Hash.ToLowerInvariant(), $f
+          }
+          $lines | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding utf8
+          Get-Content "dist/SHA256SUMS.txt"
+
           Copy-Item "README.md" -Destination "dist/README.md"
           Copy-Item "LICENSE" -Destination "dist/LICENSE"
-          Compress-Archive -Path "dist/Opacbar.exe", "dist/SHA256SUMS.txt", "dist/README.md", "dist/LICENSE" -DestinationPath "dist/Opacbar-Windows-Portable.zip" -Force
+          Compress-Archive -Force -DestinationPath "dist/Opacbar-Windows-Portable.zip" -Path `
+            "dist/Opacbar.exe", "dist/OpacbarTAP.x64.dll", "dist/OpacbarTAP.arm64.dll", `
+            "dist/SHA256SUMS.txt", "dist/README.md", "dist/LICENSE"
 
-      - name: Upload Build Artifact (Opacbar.exe + Portable ZIP)
-        uses: actions/upload-artifact@v4
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v5
         with:
-          name: Opacbar-Windows-Standalone
+          name: Opacbar-Windows
           path: |
             dist/Opacbar.exe
+            dist/OpacbarTAP.x64.dll
+            dist/OpacbarTAP.arm64.dll
             dist/Opacbar-Windows-Portable.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
@@ -54,6 +133,8 @@ jobs:
         with:
           files: |
             dist/Opacbar.exe
+            dist/OpacbarTAP.x64.dll
+            dist/OpacbarTAP.arm64.dll
             dist/Opacbar-Windows-Portable.zip
             dist/SHA256SUMS.txt
           generate_release_notes: true

@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 namespace Opacbar
@@ -14,79 +16,207 @@ namespace Opacbar
         Disabled = 4
     }
 
+    public enum EngineHealth
+    {
+        Ok = 0,
+        Paused = 1,
+        NoTaskbar = 2,
+        HelperMissing = 3,
+        HelperFailed = 4
+    }
+
     public class TaskbarEngine : IDisposable
     {
+        private struct RegionState
+        {
+            public int Left, Top, Width, Height;
+            public int Dpi;
+            public int X1, Y1, X2, Y2, Diameter;
+            public bool Valid;
+        }
+
+        private static readonly Stopwatch Clock = Stopwatch.StartNew();
+
         private AppConfig _config;
         private Timer _refreshTimer;
+        private TapHelper _tap = new TapHelper();
         private DynamicActivityState _lastDetectedState = DynamicActivityState.Desktop;
-        private bool _hadRegionApplied = false;
+        private EngineHealth _health = EngineHealth.Ok;
+        private string _healthDetail = "";
+        private int _lastCount = -1;
+
+        private readonly Dictionary<IntPtr, RegionState> _regions = new Dictionary<IntPtr, RegionState>();
+        private readonly Dictionary<IntPtr, long> _regionCheckMs = new Dictionary<IntPtr, long>();
+        private readonly Dictionary<IntPtr, string> _accentKeys = new Dictionary<IntPtr, string>();
+        private readonly Dictionary<IntPtr, long> _accentMs = new Dictionary<IntPtr, long>();
+        private readonly HashSet<IntPtr> _maximizedMonitors = new HashSet<IntPtr>();
+
+        private int _foregroundPidCached;
+        private bool _foregroundIsStartCached;
+        private bool? _isWin11;
 
         public event Action<DynamicActivityState, int> StateUpdated;
 
-        public DynamicActivityState CurrentState
-        {
-            get { return _lastDetectedState; }
-        }
-
+        public DynamicActivityState CurrentState { get { return _lastDetectedState; } }
         public int ActiveTaskbarCount { get; private set; }
+        public EngineHealth Health { get { return _health; } }
+        public string HealthDetail { get { return _healthDetail; } }
 
         public TaskbarEngine(AppConfig config)
         {
             _config = config;
             _refreshTimer = new Timer();
-            _refreshTimer.Interval = Math.Max(16, Math.Min(500, _config.RefreshRateMs));
+            _refreshTimer.Interval = ClampInterval(_config.RefreshRateMs);
             _refreshTimer.Tick += OnTick;
             _refreshTimer.Start();
-            ApplyImmediate();
+            ApplyImmediate(true);
+        }
+
+        private static int ClampInterval(int ms)
+        {
+            if (ms <= 0) return 250;
+            return Math.Max(100, Math.Min(1000, ms));
         }
 
         public void UpdateConfig(AppConfig config)
         {
             _config = config;
-            _refreshTimer.Interval = Math.Max(16, Math.Min(500, _config.RefreshRateMs));
-            ApplyImmediate();
+            _refreshTimer.Interval = ClampInterval(_config.RefreshRateMs);
+            ApplyImmediate(true);
         }
 
         private void OnTick(object sender, EventArgs e)
         {
-            ApplyImmediate();
+            try { ApplyImmediate(false); }
+            catch { }
         }
 
-        public void ApplyImmediate()
+        private static long NowMs() { return Clock.ElapsedMilliseconds; }
+
+        private bool IsWindows11()
         {
+            if (_isWin11.HasValue) return _isWin11.Value;
+            bool r = true;
+            try
+            {
+                NativeMethods.OSVERSIONINFOEX v = new NativeMethods.OSVERSIONINFOEX();
+                v.dwOSVersionInfoSize = Marshal.SizeOf(typeof(NativeMethods.OSVERSIONINFOEX));
+                if (NativeMethods.RtlGetVersion(ref v) == 0) r = v.dwBuildNumber >= 22000;
+            }
+            catch { }
+            _isWin11 = r;
+            return r;
+        }
+
+        public void ApplyImmediate(bool force = false)
+        {
+            long now = NowMs();
             List<IntPtr> taskbars = FindAllTaskbars();
             ActiveTaskbarCount = taskbars.Count;
 
             if (!_config.Enabled)
             {
-                if (_lastDetectedState != DynamicActivityState.Disabled)
+                if (_lastDetectedState != DynamicActivityState.Disabled || force)
                 {
                     RestoreTaskbarsToDefault(taskbars);
                     _lastDetectedState = DynamicActivityState.Disabled;
-                    if (StateUpdated != null) StateUpdated(_lastDetectedState, ActiveTaskbarCount);
                 }
+                SetHealth(EngineHealth.Paused, "Opacbar is paused — the taskbar is at its default look.");
+                NotifyIfChanged(DynamicActivityState.Disabled);
+                return;
+            }
+
+            if (taskbars.Count == 0)
+            {
+                SetHealth(EngineHealth.NoTaskbar, "Can't find the Windows taskbar right now (Explorer may be restarting).");
+                NotifyIfChanged(_lastDetectedState == DynamicActivityState.Disabled ? DynamicActivityState.Desktop : _lastDetectedState);
                 return;
             }
 
             DynamicActivityState state = DetectDynamicState();
-            StyleProfile activeProfile = ResolveProfileForState(state);
+            StyleProfile profile = ResolveProfileForState(state);
 
-            bool shouldUsePill = _config.FloatingPillEnabled;
-            if (shouldUsePill && _config.DockedWhenMaximized && state == DynamicActivityState.MaximizedWindow)
-            {
-                shouldUsePill = false;
-            }
-
+            // ---- accent (blur / acrylic / clear) ----
             foreach (IntPtr hwnd in taskbars)
             {
-                ApplyAccentToWindow(hwnd, activeProfile);
-                ApplyPillGeometry(hwnd, shouldUsePill);
+                ApplyAccent(hwnd, profile, force, now);
             }
 
-            if (state != _lastDetectedState)
+            // ---- background colour through the helper (Windows 11) ----
+            EngineHealth health = EngineHealth.Ok;
+            string detail = "";
+            if (IsWindows11())
             {
-                _lastDetectedState = state;
-                if (StateUpdated != null) StateUpdated(_lastDetectedState, ActiveTaskbarCount);
+                bool active = profile.Mode != TaskbarStyleMode.Normal;
+                uint pid = 0;
+                NativeMethods.GetWindowThreadProcessId(taskbars[0], out pid);
+                uint argb = 0;
+                uint flags = 0;
+                if (active)
+                {
+                    int lum = Math.Max(0, Math.Min(255, profile.Luminance));
+                    int alpha;
+                    switch (profile.Mode)
+                    {
+                        case TaskbarStyleMode.Clear: alpha = 0; break;
+                        case TaskbarStyleMode.Solid: alpha = 255; break;
+                        default: alpha = (int)Math.Round(Math.Max(0, Math.Min(100, profile.Opacity)) * 255.0 / 100.0); break;
+                    }
+                    argb = ((uint)alpha << 24) | ((uint)lum << 16) | ((uint)lum << 8) | (uint)lum;
+                    flags = 1u | (profile.ShowTopLine ? 0u : 2u);
+                }
+                try { _tap.Sync(pid, active, argb, flags); }
+                catch (Exception ex)
+                {
+                    health = EngineHealth.HelperFailed;
+                    detail = "Transparency helper error (" + ex.Message + ") — pill shape still works.";
+                }
+
+                if (health == EngineHealth.Ok && active)
+                {
+                    if (_tap.Status == TapStatus.Missing)
+                    {
+                        health = EngineHealth.HelperMissing;
+                        detail = _tap.Detail;
+                    }
+                    else if (_tap.Status == TapStatus.Failed)
+                    {
+                        health = EngineHealth.HelperFailed;
+                        detail = _tap.Detail;
+                    }
+                }
+            }
+            SetHealth(health, detail);
+
+            // ---- pill / corners ----
+            foreach (IntPtr hwnd in taskbars)
+            {
+                ApplyRegion(hwnd, force, now);
+            }
+
+            NotifyIfChanged(state);
+        }
+
+        private void SetHealth(EngineHealth h, string detail)
+        {
+            _health = h;
+            _healthDetail = detail ?? "";
+        }
+
+        private EngineHealth _notifiedHealth = EngineHealth.Ok;
+        private bool _notifiedOnce;
+
+        private void NotifyIfChanged(DynamicActivityState state)
+        {
+            bool changed = !_notifiedOnce || state != _lastDetectedState || ActiveTaskbarCount != _lastCount || _health != _notifiedHealth;
+            _notifiedOnce = true;
+            _lastDetectedState = state;
+            _lastCount = ActiveTaskbarCount;
+            _notifiedHealth = _health;
+            if (changed && StateUpdated != null)
+            {
+                try { StateUpdated(_lastDetectedState, ActiveTaskbarCount); }
+                catch { }
             }
         }
 
@@ -94,190 +224,193 @@ namespace Opacbar
         {
             switch (state)
             {
-                case DynamicActivityState.BatterySaver:
-                    return _config.BatterySaverProfile;
-                case DynamicActivityState.StartOrSearchOpen:
-                    return _config.StartMenuProfile;
-                case DynamicActivityState.MaximizedWindow:
-                    return _config.MaximizedProfile;
-                case DynamicActivityState.Desktop:
-                default:
-                    return _config.DesktopProfile;
+                case DynamicActivityState.BatterySaver: return _config.BatterySaverProfile;
+                case DynamicActivityState.StartOrSearchOpen: return _config.StartMenuProfile;
+                case DynamicActivityState.MaximizedWindow: return _config.MaximizedProfile;
+                default: return _config.DesktopProfile;
             }
         }
 
+        // ------------------------------------------------------------------ state detection
+
         private DynamicActivityState DetectDynamicState()
         {
-            // 1. Check Battery Saver / Low Power if enabled
-            if (_config.EnableBatterySaverState)
-            {
-                try
-                {
-                    PowerStatus ps = SystemInformation.PowerStatus;
-                    if (ps.PowerLineStatus == PowerLineStatus.Offline && ps.BatteryLifePercent <= 0.25f)
-                    {
-                        return DynamicActivityState.BatterySaver;
-                    }
-                }
-                catch { }
-            }
+            _maximizedMonitors.Clear();
+            bool needMax = _config.EnableMaximizedState || (_config.FloatingPillEnabled && _config.DockedWhenMaximized);
+            if (needMax) CollectMaximizedMonitors();
 
-            // 2. Check Start Menu / Search open if enabled
-            if (_config.EnableStartMenuState)
-            {
-                IntPtr fg = NativeMethods.GetForegroundWindow();
-                if (fg != IntPtr.Zero)
-                {
-                    string cls = NativeMethods.GetWindowClassName(fg);
-                    if (cls == "Windows.UI.Core.CoreWindow" ||
-                        cls == "LauncherTipWnd" ||
-                        cls == "XamlExplorerHostIslandWindow" ||
-                        cls.IndexOf("Search", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        cls.IndexOf("StartMenu", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        return DynamicActivityState.StartOrSearchOpen;
-                    }
-                }
-            }
+            if (_config.EnableBatterySaverState && IsBatterySaverOn())
+                return DynamicActivityState.BatterySaver;
 
-            // 3. Check Maximized Window if enabled
-            if (_config.EnableMaximizedState)
-            {
-                if (IsAnyVisibleWindowMaximized())
-                {
-                    return DynamicActivityState.MaximizedWindow;
-                }
-            }
+            if (_config.EnableStartMenuState && IsStartOrSearchForeground())
+                return DynamicActivityState.StartOrSearchOpen;
+
+            if (_config.EnableMaximizedState && _maximizedMonitors.Count > 0)
+                return DynamicActivityState.MaximizedWindow;
 
             return DynamicActivityState.Desktop;
         }
 
-        private bool IsAnyVisibleWindowMaximized()
+        private static bool IsBatterySaverOn()
         {
-            // Fast check on foreground window first
-            IntPtr fg = NativeMethods.GetForegroundWindow();
-            if (fg != IntPtr.Zero && IsRegularWindowMaximized(fg))
-                return true;
+            try
+            {
+                NativeMethods.SYSTEM_POWER_STATUS s;
+                if (NativeMethods.GetSystemPowerStatus(out s)) return s.SystemStatusFlag == 1;
+            }
+            catch { }
+            return false;
+        }
 
-            bool foundMaximized = false;
-            NativeMethods.EnumWindows((hwnd, lParam) =>
+        private bool IsStartOrSearchForeground()
+        {
+            IntPtr fg = NativeMethods.GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+
+            uint pid;
+            NativeMethods.GetWindowThreadProcessId(fg, out pid);
+            if (pid == 0) return false;
+
+            string cls = NativeMethods.GetWindowClassName(fg);
+            bool coreWin = (cls == "Windows.UI.Core.CoreWindow");
+            if (!coreWin) return false;
+
+            if ((int)pid == _foregroundPidCached) return _foregroundIsStartCached;
+
+            string name = GetProcessImageName(pid);
+            bool isStart = name != null &&
+                (name.Equals("StartMenuExperienceHost.exe", StringComparison.OrdinalIgnoreCase) ||
+                 name.Equals("SearchHost.exe", StringComparison.OrdinalIgnoreCase) ||
+                 name.Equals("SearchApp.exe", StringComparison.OrdinalIgnoreCase));
+            _foregroundPidCached = (int)pid;
+            _foregroundIsStartCached = isStart;
+            return isStart;
+        }
+
+        private static string GetProcessImageName(uint pid)
+        {
+            IntPtr h = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (h == IntPtr.Zero) return null;
+            try
+            {
+                StringBuilder sb = new StringBuilder(520);
+                int size = sb.Capacity;
+                if (!NativeMethods.QueryFullProcessImageName(h, 0, sb, ref size)) return null;
+                string path = sb.ToString();
+                int i = path.LastIndexOf('\\');
+                return i >= 0 ? path.Substring(i + 1) : path;
+            }
+            finally
+            {
+                NativeMethods.CloseHandle(h);
+            }
+        }
+
+        private void CollectMaximizedMonitors()
+        {
+            NativeMethods.EnumWindows(delegate (IntPtr hwnd, IntPtr lParam)
             {
                 if (IsRegularWindowMaximized(hwnd))
                 {
-                    foundMaximized = true;
-                    return false; // Stop enumeration
+                    IntPtr mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+                    _maximizedMonitors.Add(mon);
                 }
                 return true;
             }, IntPtr.Zero);
-
-            return foundMaximized;
         }
 
-        private bool IsRegularWindowMaximized(IntPtr hwnd)
+        private static bool IsRegularWindowMaximized(IntPtr hwnd)
         {
+            if (!NativeMethods.IsZoomed(hwnd)) return false;
             if (!NativeMethods.IsWindowVisible(hwnd)) return false;
             if (NativeMethods.IsIconic(hwnd)) return false;
-            if (!NativeMethods.IsZoomed(hwnd)) return false;
 
-            // Ignore cloaked UWP background windows
-            int cloaked = 0;
-            if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0)
-            {
-                if (cloaked != 0) return false;
-            }
+            int cloaked;
+            if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0 && cloaked != 0)
+                return false;
 
             string cls = NativeMethods.GetWindowClassName(hwnd);
             if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd")
                 return false;
-
             return true;
         }
 
         public List<IntPtr> FindAllTaskbars()
         {
             List<IntPtr> list = new List<IntPtr>();
-            IntPtr mainTray = NativeMethods.FindWindow("Shell_TrayWnd", null);
-            if (mainTray != IntPtr.Zero)
-            {
-                list.Add(mainTray);
-            }
+            IntPtr main = NativeMethods.FindWindow("Shell_TrayWnd", null);
+            if (main != IntPtr.Zero) list.Add(main);
 
             IntPtr secondary = IntPtr.Zero;
-            while (true)
+            for (int guard = 0; guard < 32; guard++)
             {
                 secondary = NativeMethods.FindWindowEx(IntPtr.Zero, secondary, "Shell_SecondaryTrayWnd", null);
                 if (secondary == IntPtr.Zero) break;
-                if (!list.Contains(secondary))
-                    list.Add(secondary);
+                if (!list.Contains(secondary)) list.Add(secondary);
             }
-
             return list;
         }
 
-        private void ApplyAccentToWindow(IntPtr hwnd, StyleProfile profile)
-        {
-            if (hwnd == IntPtr.Zero) return;
+        // ------------------------------------------------------------------ accent
 
+        private void ApplyAccent(IntPtr hwnd, StyleProfile p, bool force, long now)
+        {
             NativeMethods.AccentPolicy policy = new NativeMethods.AccentPolicy();
-            // Flag 2 enables drawing on all borders + allows custom color in SetWindowCompositionAttribute
             policy.AccentFlags = 2;
             policy.AnimationId = 0;
+            policy.GradientColor = 0;
+            int lum = Math.Max(0, Math.Min(255, p.Luminance));
 
-            switch (profile.Mode)
+            switch (p.Mode)
             {
-                case TaskbarStyleMode.Clear:
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
-                    policy.GradientColor = 0x00000000;
-                    break;
-
-                case TaskbarStyleMode.Acrylic:
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_ACRYLICBLURBEHIND;
-                    policy.GradientColor = profile.ToAbgrColor();
-                    break;
-
                 case TaskbarStyleMode.Blur:
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_BLURBEHIND;
-                    policy.GradientColor = profile.ToAbgrColor();
                     break;
-
-                case TaskbarStyleMode.Tinted:
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
-                    policy.GradientColor = profile.ToAbgrColor();
+                case TaskbarStyleMode.Acrylic:
+                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_ACRYLICBLURBEHIND;
+                    policy.GradientColor = 0x01000000u | ((uint)lum << 16) | ((uint)lum << 8) | (uint)lum;
                     break;
-
-                case TaskbarStyleMode.Solid:
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_GRADIENT;
-                    policy.GradientColor = profile.ToAbgrColor();
-                    break;
-
                 case TaskbarStyleMode.Normal:
-                default:
                     policy.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
-                    policy.GradientColor = 0;
+                    policy.AccentFlags = 0;
+                    break;
+                default: // Clear, Tinted, Solid
+                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
                     break;
             }
 
-            if (!profile.ShowTopLine && profile.Mode != TaskbarStyleMode.Normal)
+            string key = policy.AccentState + "/" + policy.GradientColor;
+            string prevKey;
+            long prevMs;
+            if (!force && p.Mode == TaskbarStyleMode.Normal &&
+                _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key &&
+                _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 2000)
             {
-                // Flag 2 suppresses the default Windows taskbar top border line in transparent/acrylic modes
-                policy.AccentFlags = 2;
+                return; // already default; don't poke it every tick
             }
-            else if (profile.ShowTopLine)
+            if (!force && p.Mode != TaskbarStyleMode.Normal &&
+                _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 240 &&
+                _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key)
             {
-                policy.AccentFlags = 0x20 | 2;
+                return; // throttle to ~4/s
             }
 
-            int size = Marshal.SizeOf(policy);
+            SetAccent(hwnd, policy);
+            _accentKeys[hwnd] = key;
+            _accentMs[hwnd] = now;
+        }
+
+        private static void SetAccent(IntPtr hwnd, NativeMethods.AccentPolicy policy)
+        {
+            int size = Marshal.SizeOf(typeof(NativeMethods.AccentPolicy));
             IntPtr ptr = Marshal.AllocHGlobal(size);
             try
             {
                 Marshal.StructureToPtr(policy, ptr, false);
-                NativeMethods.WindowCompositionAttributeData data = new NativeMethods.WindowCompositionAttributeData
-                {
-                    Attribute = NativeMethods.WindowCompositionAttribute.WCA_ACCENT_POLICY,
-                    SizeOfData = size,
-                    Data = ptr
-                };
+                NativeMethods.WindowCompositionAttributeData data = new NativeMethods.WindowCompositionAttributeData();
+                data.Attribute = NativeMethods.WindowCompositionAttribute.WCA_ACCENT_POLICY;
+                data.SizeOfData = size;
+                data.Data = ptr;
                 NativeMethods.SetWindowCompositionAttribute(hwnd, ref data);
             }
             finally
@@ -286,80 +419,128 @@ namespace Opacbar
             }
         }
 
-        private void ApplyPillGeometry(IntPtr hwnd, bool enablePill)
-        {
-            if (hwnd == IntPtr.Zero) return;
+        // ------------------------------------------------------------------ region (pill)
 
-            if (!enablePill)
+        private void ApplyRegion(IntPtr hwnd, bool force, long now)
+        {
+            NativeMethods.RECT rect;
+            if (!NativeMethods.GetWindowRect(hwnd, out rect)) return;
+            int width = rect.Width, height = rect.Height;
+            if (width <= 0 || height <= 0) return;
+
+            bool pill = _config.FloatingPillEnabled;
+            if (pill && _config.DockedWhenMaximized)
             {
-                if (_hadRegionApplied)
+                IntPtr mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+                if (_maximizedMonitors.Contains(mon)) pill = false;
+            }
+
+            RegionState prev;
+            bool hadPrev = _regions.TryGetValue(hwnd, out prev) && prev.Valid;
+
+            if (!pill)
+            {
+                if (hadPrev || force)
                 {
                     NativeMethods.SetWindowRgn(hwnd, IntPtr.Zero, true);
-                    int cornerDefault = 0; // DWMWCP_DEFAULT
-                    NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerDefault, sizeof(int));
+                    _regions.Remove(hwnd);
                 }
                 return;
             }
 
-            NativeMethods.RECT rect;
-            if (!NativeMethods.GetWindowRect(hwnd, out rect)) return;
+            int dpi = 96;
+            try { dpi = (int)NativeMethods.GetDpiForWindow(hwnd); } catch { }
+            if (dpi <= 0) dpi = 96;
+            double scale = dpi / 96.0;
 
-            int width = rect.Width;
-            int height = rect.Height;
-            if (width <= 0 || height <= 0) return;
+            int mx = (int)Math.Round(Math.Max(0, _config.HorizontalMargin) * scale);
+            int my = (int)Math.Round(Math.Max(0, _config.VerticalMargin) * scale);
+            mx = Math.Min(mx, (width * 2) / 5);
+            my = Math.Min(my, height / 3);
 
-            int marginX = Math.Max(0, Math.Min(width / 3, _config.HorizontalMargin));
-            int marginY = Math.Max(0, Math.Min(height / 3, _config.VerticalMargin));
-            int radius = Math.Max(0, Math.Min(64, _config.CornerRadius));
+            int x1 = mx, y1 = my, x2 = width - mx, y2 = height - my;
+            int pillH = y2 - y1;
+            int radius = (int)Math.Round(Math.Max(0, _config.CornerRadius) * scale);
+            radius = Math.Min(radius, pillH / 2);
+            int diameter = radius * 2;
 
-            int x1 = marginX;
-            int y1 = marginY;
-            int x2 = width - marginX;
-            int y2 = height - marginY;
+            RegionState cur = new RegionState();
+            cur.Left = rect.Left; cur.Top = rect.Top; cur.Width = width; cur.Height = height;
+            cur.Dpi = dpi; cur.X1 = x1; cur.Y1 = y1; cur.X2 = x2; cur.Y2 = y2; cur.Diameter = diameter;
+            cur.Valid = true;
 
-            IntPtr hRgn;
-            if (radius <= 0)
+            bool same = hadPrev &&
+                prev.Left == cur.Left && prev.Top == cur.Top && prev.Width == cur.Width && prev.Height == cur.Height &&
+                prev.Dpi == cur.Dpi && prev.X1 == cur.X1 && prev.Y1 == cur.Y1 && prev.X2 == cur.X2 &&
+                prev.Y2 == cur.Y2 && prev.Diameter == cur.Diameter;
+
+            bool needApply = force || !same;
+            if (!needApply)
             {
-                hRgn = NativeMethods.CreateRectRgn(x1, y1, x2 + 1, y2 + 1);
-            }
-            else
-            {
-                int diameter = radius * 2;
-                hRgn = NativeMethods.CreateRoundRectRgn(x1, y1, x2 + 1, y2 + 1, diameter, diameter);
-            }
-
-            if (hRgn != IntPtr.Zero)
-            {
-                // Note: SetWindowRgn takes ownership of hRgn, so do NOT call DeleteObject on hRgn if SetWindowRgn succeeds
-                int res = NativeMethods.SetWindowRgn(hwnd, hRgn, true);
-                if (res == 0)
+                // safety check every ~2s: has explorer dropped or replaced our region?
+                long last;
+                if (!_regionCheckMs.TryGetValue(hwnd, out last) || now - last >= 2000)
                 {
-                    NativeMethods.DeleteObject(hRgn);
-                }
-                else
-                {
-                    _hadRegionApplied = true;
+                    _regionCheckMs[hwnd] = now;
+                    needApply = !RegionMatches(hwnd, x1, y1, x2, y2);
                 }
             }
+            if (!needApply) return;
 
-            // Also notify DWM on Windows 11 builds when rounded corners are requested
-            int cornerPref = (radius == 0) ? 1 : (radius <= 8 ? 3 : 2); // 1=DoNotRound, 2=Round, 3=RoundSmall
-            NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerPref, sizeof(int));
+            IntPtr hRgn = (diameter <= 0)
+                ? NativeMethods.CreateRectRgn(x1, y1, x2, y2)
+                : NativeMethods.CreateRoundRectRgn(x1, y1, x2 + 1, y2 + 1, diameter, diameter);
+            if (hRgn == IntPtr.Zero) return;
+            if (NativeMethods.SetWindowRgn(hwnd, hRgn, true) == 0)
+            {
+                NativeMethods.DeleteObject(hRgn);
+                return;
+            }
+            _regions[hwnd] = cur;
+            _regionCheckMs[hwnd] = now;
         }
+
+        private static bool RegionMatches(IntPtr hwnd, int x1, int y1, int x2, int y2)
+        {
+            IntPtr tmp = NativeMethods.CreateRectRgn(0, 0, 0, 0);
+            if (tmp == IntPtr.Zero) return true;
+            try
+            {
+                int type = NativeMethods.GetWindowRgn(hwnd, tmp);
+                if (type == 0) return false; // ERROR: no region set
+                NativeMethods.RECT box;
+                NativeMethods.GetRgnBox(tmp, out box);
+                // rect regions are exclusive on right/bottom; rounded ones were built with +1
+                return box.Left == x1 && box.Top == y1 &&
+                       (box.Right == x2 || box.Right == x2 + 1) &&
+                       (box.Bottom == y2 || box.Bottom == y2 + 1);
+            }
+            finally
+            {
+                NativeMethods.DeleteObject(tmp);
+            }
+        }
+
+        // ------------------------------------------------------------------ restore / dispose
 
         public void RestoreTaskbarsToDefault(List<IntPtr> taskbars = null)
         {
             if (taskbars == null) taskbars = FindAllTaskbars();
-            StyleProfile normal = new StyleProfile { Mode = TaskbarStyleMode.Normal };
+
+            try { _tap.Restore(); } catch { }
+
+            NativeMethods.AccentPolicy off = new NativeMethods.AccentPolicy();
+            off.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
             foreach (IntPtr hwnd in taskbars)
             {
-                ApplyAccentToWindow(hwnd, normal);
+                SetAccent(hwnd, off);
                 NativeMethods.SetWindowRgn(hwnd, IntPtr.Zero, true);
-                int cornerDefault = 0;
-                NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerDefault, sizeof(int));
                 NativeMethods.InvalidateRect(hwnd, IntPtr.Zero, true);
             }
-            _hadRegionApplied = false;
+            _regions.Clear();
+            _regionCheckMs.Clear();
+            _accentKeys.Clear();
+            _accentMs.Clear();
         }
 
         public void Dispose()
