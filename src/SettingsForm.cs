@@ -39,6 +39,18 @@ namespace Opacbar
         private SegmentedControl _tabs;
         private StackPanel _pageLook, _pageGeneral;
         private DateTime _restartClickedUtc = DateTime.MinValue;
+        private TextBlock _situationHint;
+
+        private static string SituationHint(int index)
+        {
+            switch (index)
+            {
+                case 1: return "Used while an app is maximized or full screen.";
+                case 2: return "Used while the Start menu or Search is open.";
+                case 3: return "Used while Windows battery saver is on.";
+                default: return "Your everyday taskbar look.";
+            }
+        }
         private bool _pickerOpen;
 
         // Look
@@ -156,11 +168,14 @@ namespace Opacbar
         {
             StackPanel p = NewPage();
 
-            _situation = new SegmentedControl("Desktop", "Maximized", "Start", "Battery");
+            _situation = new SegmentedControl("Normal", "App full", "Start open", "Battery");
             _situation.SelectedIndex = 0;
+            _situationHint = new TextBlock(SituationHint(0));
             _situation.SelectedIndexChanged += delegate
             {
+                _situationHint.TextValue = SituationHint(_situation.SelectedIndex);
                 SyncControlsFromConfig();
+                if (IsHandleCreated) Relayout();
             };
 
             ToggleSwitch useTog = new ToggleSwitch();
@@ -238,9 +253,8 @@ namespace Opacbar
                 Commit();
             };
 
-            p.Controls.Add(new SectionHeader("Situation"));
-            p.Controls.Add(_situation);
-            p.Controls.Add(_useDifferent);
+            // One look for all situations: the situation picker is intentionally not shown
+            // (_situation stays at index 0 = the everyday profile).
             p.Controls.Add(new SectionHeader("Style"));
             p.Controls.Add(_style);
             p.Controls.Add(_colorRow);
@@ -529,9 +543,6 @@ namespace Opacbar
             {
                 switch (_engine.CurrentState)
                 {
-                    case DynamicActivityState.MaximizedWindow: text = "Active · window maximized"; break;
-                    case DynamicActivityState.StartOrSearchOpen: text = "Active · Start or Search open"; break;
-                    case DynamicActivityState.BatterySaver: text = "Active · battery saver"; break;
                     case DynamicActivityState.Disabled: text = "Off"; dot = Theme.TextDisabled; break;
                     default: text = "Active"; break;
                 }

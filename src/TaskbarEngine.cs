@@ -154,6 +154,29 @@ namespace Opacbar
                     detail = "Taskbar helper error (" + ex.Message + ").";
                 }
 
+                // Blur / Acrylic: the helper made the XAML background transparent; the DWM accent on the
+                // taskbar window supplies the blur. Explorer resets accents, so this re-applies ~4x/s.
+                // When leaving Blur/Acrylic, put the accent back once so no stale blur remains.
+                bool blurry = profile.Material == Material.Blur || profile.Material == Material.Acrylic;
+                foreach (IntPtr hwnd in taskbars)
+                {
+                    if (blurry)
+                    {
+                        ApplyAccent(hwnd, profile, force, now);
+                    }
+                    else if (_accentKeys.ContainsKey(hwnd))
+                    {
+                        NativeMethods.AccentPolicy reset = new NativeMethods.AccentPolicy();
+                        reset.AccentState = profile.Material == Material.Windows
+                            ? NativeMethods.AccentState.ACCENT_DISABLED
+                            : NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
+                        reset.AccentFlags = profile.Material == Material.Windows ? 0u : 2u;
+                        SetAccent(hwnd, reset);
+                        _accentKeys.Remove(hwnd);
+                        _accentMs.Remove(hwnd);
+                    }
+                }
+
                 if (health == EngineHealth.Ok && styled)
                 {
                     switch (_tap.Status)
@@ -204,6 +227,9 @@ namespace Opacbar
 
         private StyleProfile ResolveProfileForState(DynamicActivityState state)
         {
+            // One look for every situation (owner decision 2026-11-08): the per-situation
+            // profiles stay in the config file for compatibility but are no longer used.
+            if (_config.DesktopProfile != null) return _config.DesktopProfile;
             switch (state)
             {
                 case DynamicActivityState.BatterySaver: return _config.BatterySaverProfile;
@@ -350,7 +376,9 @@ namespace Opacbar
             switch (p.Material)
             {
                 case Material.Blur:
+                    // Plain blur, lightly tinted with the chosen color (60% of the opacity setting).
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_BLURBEHIND;
+                    policy.GradientColor = ((uint)(alpha * 6 / 10) << 24) | abgr;
                     break;
                 case Material.Acrylic:
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_ACRYLICBLURBEHIND;

@@ -685,25 +685,26 @@ namespace Opacbar
                     uint pid = 0;
                     if (tray != IntPtr.Zero) NativeMethods.GetWindowThreadProcessId(tray, out pid);
 
-                    if (tray != IntPtr.Zero) NativeMethods.PostMessage(tray, 0x5B4, IntPtr.Zero, IntPtr.Zero);
-
-                    long deadline = Clock.ElapsedMilliseconds + 3000;
-                    bool replaced = false;
-                    while (Clock.ElapsedMilliseconds < deadline)
+                    // End the shell process the way Task Manager's "Restart" does. Windows restarts a shell
+                    // that was terminated (AutoRestartShell), but NOT one that exited cleanly (WM_USER+436),
+                    // which previously left the user without a taskbar.
+                    if (pid != 0)
                     {
-                        Thread.Sleep(150);
-                        IntPtr nt = NativeMethods.FindWindow("Shell_TrayWnd", null);
-                        if (nt == IntPtr.Zero) continue;
-                        uint npid;
-                        NativeMethods.GetWindowThreadProcessId(nt, out npid);
-                        if (npid != pid) { replaced = true; break; }
+                        try { using (Process p = Process.GetProcessById((int)pid)) { p.Kill(); p.WaitForExit(5000); } }
+                        catch { }
                     }
 
-                    if (!replaced && NativeMethods.FindWindow("Shell_TrayWnd", null) == IntPtr.Zero)
+                    if (!WaitForNewShell(pid, 8000))
                     {
-                        // Explorer exited but Windows did not bring the shell back: start it.
-                        try { Process.Start("explorer.exe"); } catch { }
-                        for (int i = 0; i < 20 && NativeMethods.FindWindow("Shell_TrayWnd", null) == IntPtr.Zero; i++) Thread.Sleep(150);
+                        // Windows did not bring the shell back: start it ourselves (full path, so we never
+                        // pick up a different explorer.exe from the working directory or PATH).
+                        try
+                        {
+                            string exe = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+                            Process.Start(exe);
+                        }
+                        catch { }
+                        WaitForNewShell(pid, 15000);
                     }
                 }
                 catch { }
@@ -721,6 +722,24 @@ namespace Opacbar
         }
 
         public bool IsRestarting { get { return _restarting; } }
+
+        // Waits until a taskbar owned by a different process than oldPid exists.
+        private static bool WaitForNewShell(uint oldPid, int timeoutMs)
+        {
+            long deadline = Clock.ElapsedMilliseconds + timeoutMs;
+            while (Clock.ElapsedMilliseconds < deadline)
+            {
+                IntPtr nt = NativeMethods.FindWindow("Shell_TrayWnd", null);
+                if (nt != IntPtr.Zero)
+                {
+                    uint npid;
+                    NativeMethods.GetWindowThreadProcessId(nt, out npid);
+                    if (npid != 0 && npid != oldPid) return true;
+                }
+                Thread.Sleep(200);
+            }
+            return false;
+        }
 
         /// <summary>
         /// Restarts Explorer without asking, rate-limited so a broken helper can never cause a restart loop:

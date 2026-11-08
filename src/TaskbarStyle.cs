@@ -57,9 +57,12 @@ namespace Opacbar
                 case Material.Color:
                     return "#" + Alpha(o) + rrggbb;
                 case Material.Acrylic:
-                    return AcrylicXaml(rrggbb, o, o, o);
                 case Material.Blur:
-                    return AcrylicXaml(rrggbb, o * BlurTintScale, Math.Max(BlurMinLuminosity, o * BlurLuminosityScale), o * BlurTintScale);
+                    // XAML's HostBackdrop AcrylicBrush does not blur inside the taskbar island (verified on
+                    // Win11 26300: it only shows its fallback color). Instead the background is made
+                    // transparent and the engine applies the DWM blur/acrylic accent to the taskbar window,
+                    // tinted with the chosen color + opacity (the TranslucentTB approach).
+                    return Transparent;
                 default:
                     return null;
             }
