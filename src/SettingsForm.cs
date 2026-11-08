@@ -16,14 +16,10 @@ namespace Opacbar
         private const int CS_DROPSHADOW = 0x00020000;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
 
-        private static readonly TaskbarStyleMode[] StyleModes = new TaskbarStyleMode[]
+        private static readonly Material[] Materials = new Material[]
         {
-            TaskbarStyleMode.Clear, TaskbarStyleMode.Tinted, TaskbarStyleMode.Blur,
-            TaskbarStyleMode.Acrylic, TaskbarStyleMode.Solid, TaskbarStyleMode.Normal
+            Material.Clear, Material.Color, Material.Blur, Material.Acrylic, Material.Windows
         };
-
-        private static readonly int[] CornerPresets = new int[] { 0, 8, 16, 24 };
-
         private static int _lastTab;
 
         private readonly AppConfig _config;
@@ -39,23 +35,24 @@ namespace Opacbar
         private StackPanel _root;
         private HeaderBar _header;
         private TextBlock _note;
+        private FlatButton _restartBtn;
         private SegmentedControl _tabs;
-        private StackPanel _pageLook, _pageShape, _pageGeneral;
+        private StackPanel _pageLook, _pageGeneral;
+        private int _restartTick = int.MinValue;
+        private bool _pickerOpen;
 
         // Look
         private SegmentedControl _situation, _style;
         private Row _useDifferent, _topLine;
-        private LabeledSlider _shade, _opacity;
-
-        // Shape
-        private Row _floating, _docked;
-        private SegmentedControl _corners;
-        private LabeledSlider _radius, _sideGap, _bottomGap;
+        private ColorSwatchRow _colorRow;
+        private ColorPickerPanel _picker;
+        private LabeledSlider _opacity;
+        private TextBlock _hint;
 
         // General
         private Row _startup, _themeRow;
         private SegmentedControl _themeSeg;
-
+        private TextBlock _mapNote;
         public event EventHandler ConfigChanged;
         public event EventHandler QuitRequested;
 
@@ -119,8 +116,17 @@ namespace Opacbar
 
             _note = new TextBlock("") { Visible = false };
 
-            _tabs = new SegmentedControl("Look", "Shape", "General");
-            _tabs.SelectedIndex = _lastTab;
+            _restartBtn = new FlatButton("Restart Explorer") { Visible = false };
+            _restartBtn.Click += delegate
+            {
+                if (_engine == null) return;
+                _restartTick = Environment.TickCount;
+                _restartBtn.Enabled = false;
+                _engine.RestartExplorer();
+            };
+
+            _tabs = new SegmentedControl("Look", "General");
+            _tabs.SelectedIndex = Math.Max(0, Math.Min(1, _lastTab));
             _tabs.SelectedIndexChanged += delegate
             {
                 _lastTab = _tabs.SelectedIndex;
@@ -129,14 +135,13 @@ namespace Opacbar
             };
 
             _pageLook = BuildLookPage();
-            _pageShape = BuildShapePage();
             _pageGeneral = BuildGeneralPage();
 
             _root.Controls.Add(_header);
             _root.Controls.Add(_note);
+            _root.Controls.Add(_restartBtn);
             _root.Controls.Add(_tabs);
             _root.Controls.Add(_pageLook);
-            _root.Controls.Add(_pageShape);
             _root.Controls.Add(_pageGeneral);
             Controls.Add(_root);
             ShowPage();
@@ -168,24 +173,48 @@ namespace Opacbar
                 Commit();
             };
 
-            _style = new SegmentedControl("Clear", "Tint", "Blur", "Acrylic", "Solid", "Windows");
+            _style = new SegmentedControl("Clear", "Color", "Blur", "Acrylic", "Windows");
             _style.SelectedIndexChanged += delegate
             {
                 if (_syncing) return;
                 int i = _style.SelectedIndex;
-                if (i >= 0 && i < StyleModes.Length) CurrentProfile().Mode = StyleModes[i];
+                if (i < 0 || i >= Materials.Length) return;
+                StyleProfile cp = CurrentProfile();
+                cp.Material = Materials[i];
+                if (IsTinted(cp.Material) && cp.Opacity < 10)
+                {
+                    // Coming from Clear: start at a visible opacity instead of an invisible one.
+                    cp.Opacity = 60;
+                    _syncing = true;
+                    _opacity.Value = cp.Opacity;
+                    _syncing = false;
+                }
                 UpdateEnabledStates();
                 Commit();
             };
 
-            _shade = new LabeledSlider("Shade", 0, 255);
-            _shade.Hint = "Black to white";
-            _shade.Gradient = true;
-            _shade.Format = delegate(int v) { return Math.Round(v * 100.0 / 255.0) + "%"; };
-            _shade.ValueChanged += delegate
+            _colorRow = new ColorSwatchRow("Color");
+            _colorRow.Clicked += delegate
+            {
+                _pickerOpen = !_pickerOpen;
+                UpdateEnabledStates();
+            };
+
+            _picker = new ColorPickerPanel();
+            _picker.Recents = _config.RecentColors;
+            _picker.ColorChanged += delegate
             {
                 if (_syncing) return;
-                CurrentProfile().Luminance = _shade.Value;
+                Color c = _picker.Value;
+                CurrentProfile().Color = ColorMath.Hex(c);
+                _colorRow.Value = c;
+                CommitLight(); // live apply while dragging
+            };
+            _picker.ColorCommitted += delegate
+            {
+                if (_syncing) return;
+                AddRecentColor(ColorMath.Hex(_picker.Value));
+                _picker.Invalidate();
                 Commit();
             };
 
@@ -195,15 +224,17 @@ namespace Opacbar
             {
                 if (_syncing) return;
                 CurrentProfile().Opacity = _opacity.Value;
-                Commit();
+                CommitLight();
             };
+
+            _hint = new TextBlock("Needs Windows transparency effects on") { Visible = false };
 
             ToggleSwitch lineTog = new ToggleSwitch();
             _topLine = new Row("Hide top line", lineTog);
             lineTog.CheckedChanged += delegate
             {
                 if (_syncing) return;
-                CurrentProfile().ShowTopLine = !lineTog.Checked;
+                CurrentProfile().HideTopLine = lineTog.Checked;
                 Commit();
             };
 
@@ -212,90 +243,49 @@ namespace Opacbar
             p.Controls.Add(_useDifferent);
             p.Controls.Add(new SectionHeader("Style"));
             p.Controls.Add(_style);
-            p.Controls.Add(_shade);
+            p.Controls.Add(_colorRow);
+            p.Controls.Add(_picker);
             p.Controls.Add(_opacity);
+            p.Controls.Add(_hint);
             p.Controls.Add(_topLine);
             return p;
         }
 
-        private StackPanel BuildShapePage()
+        private static bool IsTinted(Material m)
         {
-            StackPanel p = NewPage();
-
-            ToggleSwitch floatTog = new ToggleSwitch();
-            _floating = new Row("Floating", floatTog);
-            _floating.Description = "Lift the taskbar off the screen edge";
-            floatTog.CheckedChanged += delegate
-            {
-                if (_syncing) return;
-                _config.FloatingPillEnabled = floatTog.Checked;
-                UpdateEnabledStates();
-                Commit();
-            };
-
-            _corners = new SegmentedControl("Square", "Soft", "Round", "Pill");
-            _corners.SelectedIndexChanged += delegate
-            {
-                if (_syncing) return;
-                int i = _corners.SelectedIndex;
-                if (i < 0 || i >= CornerPresets.Length) return;
-                _config.CornerRadius = CornerPresets[i];
-                _syncing = true;
-                _radius.Value = _config.CornerRadius;
-                _syncing = false;
-                Commit();
-            };
-
-            _radius = new LabeledSlider("Corner radius", 0, 24);
-            _radius.Format = delegate(int v) { return v + " px"; };
-            _radius.ValueChanged += delegate
-            {
-                if (_syncing) return;
-                _config.CornerRadius = _radius.Value;
-                _syncing = true;
-                _corners.SelectedIndex = Array.IndexOf(CornerPresets, _config.CornerRadius);
-                _syncing = false;
-                Commit();
-            };
-
-            _sideGap = new LabeledSlider("Side gap", 0, 64);
-            _sideGap.Format = delegate(int v) { return v + " px"; };
-            _sideGap.ValueChanged += delegate
-            {
-                if (_syncing) return;
-                _config.HorizontalMargin = _sideGap.Value;
-                Commit();
-            };
-
-            _bottomGap = new LabeledSlider("Bottom gap", 0, 12);
-            _bottomGap.Format = delegate(int v) { return v + " px"; };
-            _bottomGap.ValueChanged += delegate
-            {
-                if (_syncing) return;
-                _config.VerticalMargin = _bottomGap.Value;
-                Commit();
-            };
-
-            ToggleSwitch dockTog = new ToggleSwitch();
-            _docked = new Row("Full width when an app is maximized", dockTog);
-            dockTog.CheckedChanged += delegate
-            {
-                if (_syncing) return;
-                _config.DockedWhenMaximized = dockTog.Checked;
-                Commit();
-            };
-
-            p.Controls.Add(_floating);
-            p.Controls.Add(new SectionHeader("Corners"));
-            p.Controls.Add(_corners);
-            p.Controls.Add(_radius);
-            p.Controls.Add(new SectionHeader("Spacing"));
-            p.Controls.Add(_sideGap);
-            p.Controls.Add(_bottomGap);
-            p.Controls.Add(_docked);
-            return p;
+            return m == Material.Color || m == Material.Blur || m == Material.Acrylic;
         }
 
+        private void AddRecentColor(string hex)
+        {
+            string n = TaskbarStyle.NormalizeHex(hex);
+            if (n == null) return;
+            if (_config.RecentColors == null) _config.RecentColors = new System.Collections.Generic.List<string>();
+            _config.RecentColors.RemoveAll(delegate(string s) { return string.Equals(s, n, StringComparison.OrdinalIgnoreCase); });
+            _config.RecentColors.Insert(0, n);
+            while (_config.RecentColors.Count > AppConfig.MaxRecentColors)
+                _config.RecentColors.RemoveAt(_config.RecentColors.Count - 1);
+            _picker.Recents = _config.RecentColors;
+        }
+
+        /// <summary>True unless Windows transparency effects are switched off.</summary>
+        private static bool TransparencyEnabled()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", false))
+                {
+                    if (k != null)
+                    {
+                        object v = k.GetValue("EnableTransparency");
+                        if (v is int) return (int)v != 0;
+                    }
+                }
+            }
+            catch { }
+            return true;
+        }
         private StackPanel BuildGeneralPage()
         {
             StackPanel p = NewPage();
@@ -341,23 +331,27 @@ namespace Opacbar
             footer.Small = true;
             footer.Center = true;
 
+            FlatButton map = new FlatButton("Save taskbar map...");
+            map.Click += delegate { SaveTaskbarMap(); };
+            _mapNote = new TextBlock("") { Visible = false };
+
             p.Controls.Add(_startup);
             p.Controls.Add(_themeRow);
             p.Controls.Add(new SectionHeader("Settings"));
             p.Controls.Add(open);
             p.Controls.Add(reset);
+            p.Controls.Add(new SectionHeader("Developer"));
+            p.Controls.Add(map);
+            p.Controls.Add(_mapNote);
             p.Controls.Add(quit);
             p.Controls.Add(footer);
             return p;
         }
-
         private void ShowPage()
         {
             _pageLook.Visible = _tabs.SelectedIndex == 0;
-            _pageShape.Visible = _tabs.SelectedIndex == 1;
-            _pageGeneral.Visible = _tabs.SelectedIndex == 2;
+            _pageGeneral.Visible = _tabs.SelectedIndex == 1;
         }
-
         // ---- Config <-> controls ----------------------------------------------------
 
         private StyleProfile CurrentProfile()
@@ -404,18 +398,13 @@ namespace Opacbar
                 int idx = Math.Max(0, _situation.SelectedIndex);
                 StyleProfile p = CurrentProfile();
                 ((ToggleSwitch)_useDifferent.Trailing).Checked = GetSituationEnabled(idx);
-                _style.SelectedIndex = Array.IndexOf(StyleModes, p.Mode);
-                _shade.Value = p.Luminance;
+                _style.SelectedIndex = Array.IndexOf(Materials, p.Material);
                 _opacity.Value = p.Opacity;
-                ((ToggleSwitch)_topLine.Trailing).Checked = !p.ShowTopLine;
-
-                ((ToggleSwitch)_floating.Trailing).Checked = _config.FloatingPillEnabled;
-                _corners.SelectedIndex = Array.IndexOf(CornerPresets, _config.CornerRadius);
-                _radius.Value = _config.CornerRadius;
-                _sideGap.Value = _config.HorizontalMargin;
-                _bottomGap.Value = _config.VerticalMargin;
-                ((ToggleSwitch)_docked.Trailing).Checked = _config.DockedWhenMaximized;
-
+                Color pc = ColorMath.Parse(p.Color, Color.Black);
+                _picker.Recents = _config.RecentColors;
+                _picker.Value = pc;
+                _colorRow.Value = pc;
+                ((ToggleSwitch)_topLine.Trailing).Checked = p.HideTopLine;
                 ((ToggleSwitch)_startup.Trailing).Checked = _config.LaunchAtStartup;
                 _themeSeg.SelectedIndex = _config.UiTheme;
             }
@@ -433,19 +422,27 @@ namespace Opacbar
             int idx = Math.Max(0, _situation.SelectedIndex);
             _useDifferent.Visible = idx > 0;
             bool look = idx == 0 || GetSituationEnabled(idx);
-            TaskbarStyleMode m = CurrentProfile().Mode;
+            Material m = CurrentProfile().Material;
+            bool tinted = IsTinted(m);
 
             _style.Enabled = look;
-            _shade.Enabled = look && m != TaskbarStyleMode.Normal;
-            _opacity.Enabled = look && (m == TaskbarStyleMode.Tinted || m == TaskbarStyleMode.Blur || m == TaskbarStyleMode.Acrylic);
-            _topLine.Enabled = look;
+            _colorRow.Visible = tinted;
+            _colorRow.Enabled = look;
+            _colorRow.Expanded = _pickerOpen;
+            _picker.Visible = tinted && look && _pickerOpen;
+            _opacity.Visible = tinted;
+            _opacity.Enabled = look;
+            _topLine.Enabled = look && m != Material.Windows;
 
-            bool fl = _config.FloatingPillEnabled;
-            _corners.Enabled = fl;
-            _radius.Enabled = fl;
-            _sideGap.Enabled = fl;
-            _bottomGap.Enabled = fl;
-            _docked.Enabled = fl;
+            bool blurry = m == Material.Blur || m == Material.Acrylic;
+            _hint.Visible = blurry;
+            if (blurry)
+            {
+                bool off = !TransparencyEnabled();
+                _hint.Dot = off ? (Color?)Theme.Warning : null;
+                _hint.TextValue = off ? "Needs Windows transparency effects on. They are off right now." : "Needs Windows transparency effects on";
+            }
+            if (IsHandleCreated) Relayout();
         }
 
         private void Commit()
@@ -459,6 +456,14 @@ namespace Opacbar
             if (h != null) h(this, EventArgs.Empty);
         }
 
+        /// <summary>Cheap commit for continuous input (dragging): updates the taskbar and schedules a save only.</summary>
+        private void CommitLight()
+        {
+            if (_syncing) return;
+            if (_engine != null) _engine.UpdateConfig(_config);
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        }
         private void FlushSave()
         {
             _saveTimer.Stop();
@@ -507,6 +512,12 @@ namespace Opacbar
                 dot = Theme.Warning;
                 note = _engine.HealthDetail;
             }
+            else if (health == EngineHealth.HelperOutdated)
+            {
+                text = "Helper update pending";
+                dot = Theme.Warning;
+                note = _engine.HealthDetail;
+            }
             else if (health == EngineHealth.HelperFailed)
             {
                 text = "Helper failed";
@@ -530,12 +541,17 @@ namespace Opacbar
 
             _header.SetStatus(text, dot);
 
+            bool showRestart = _config.Enabled && health == EngineHealth.HelperOutdated;
+            bool restartChanged = _restartBtn.WantVisible != showRestart;
+            _restartBtn.Visible = showRestart;
+            _restartBtn.Enabled = unchecked(Environment.TickCount - _restartTick) > 8000;
+
             bool showNote = !string.IsNullOrEmpty(note);
             bool changed = _note.WantVisible != showNote || (showNote && _note.TextValue != note);
             _note.Dot = noteColor;
             if (showNote) _note.TextValue = note;
             _note.Visible = showNote;
-            if (changed && IsHandleCreated) Relayout();
+            if ((changed || restartChanged) && IsHandleCreated) Relayout();
         }
 
         // ---- Layout / sizing --------------------------------------------------------
@@ -543,10 +559,11 @@ namespace Opacbar
         /// <summary>Recomputes content height and resizes the window, keeping its bottom edge fixed.</summary>
         private void Relayout()
         {
+
             int w = Theme.Px(Theme.FlyoutWidth);
             int inner = w - 2;
             int h = _root.GetPreferredHeight(inner) + 2;
-            h = Math.Min(h, Theme.Px(Theme.FlyoutMaxHeight));
+            h = Math.Min(h, MaxHeight());
 
             if (Visible)
             {
@@ -561,6 +578,19 @@ namespace Opacbar
             _root.SetBounds(1, 1, w - 2, h - 2);
             _root.PerformLayout();
             Invalidate(true);
+
+        }
+
+        private int MaxHeight()
+        {
+            int max = Theme.Px(Theme.FlyoutMaxHeight);
+            try
+            {
+                Rectangle wa = Screen.FromPoint(Visible ? new Point(Left, Top) : Cursor.Position).WorkingArea;
+                max = Math.Min(max, wa.Height - 2 * Theme.Px(Theme.FlyoutEdgeGap));
+            }
+            catch { }
+            return Math.Max(Theme.Px(200), max);
         }
 
         private void PlaceAboveTray(int dpi)
@@ -568,7 +598,7 @@ namespace Opacbar
             Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
             int gap = Theme.Px(Theme.FlyoutEdgeGap);
             int w = Theme.Px(Theme.FlyoutWidth);
-            int h = Math.Min(_root.GetPreferredHeight(w - 2) + 2, Theme.Px(Theme.FlyoutMaxHeight));
+            int h = Math.Min(_root.GetPreferredHeight(w - 2) + 2, MaxHeight());
             SetBounds(wa.Right - w - gap, wa.Bottom - h - gap, w, h);
             _root.SetBounds(1, 1, w - 2, h - 2);
             _root.PerformLayout();
@@ -704,6 +734,22 @@ namespace Opacbar
             HideFlyout();
         }
 
+        private void SaveTaskbarMap()
+        {
+            if (_engine == null) return;
+            string path, err;
+            bool ok = _engine.SaveTaskbarMap(out path, out err);
+            _mapNote.Dot = ok ? Theme.Success : Theme.Error;
+            _mapNote.TextValue = ok ? "Saved to " + path : err;
+            _mapNote.Visible = true;
+            Relayout();
+            if (!ok) return;
+            _suppressHide = true;
+            try { Process.Start("explorer.exe", "/select,\"" + path + "\""); }
+            catch { }
+            _suppressHide = false;
+        }
+
         private void ResetDefaults()
         {
             _suppressHide = true;
@@ -733,6 +779,9 @@ namespace Opacbar
         }
     }
 }
+
+
+
 
 
 

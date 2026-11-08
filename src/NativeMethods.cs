@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Text;
 using System.Runtime.InteropServices;
 
@@ -76,11 +76,8 @@ namespace Opacbar
         [DllImport("user32.dll")]
         public static extern int SetWindowCompositionAttribute(IntPtr hwnd, ref WindowCompositionAttributeData data);
 
-        [DllImport("user32.dll")]
-        public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
-
-        [DllImport("user32.dll")]
-        public static extern int GetWindowRgn(IntPtr hWnd, IntPtr hRgn);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetDC(IntPtr hWnd);
@@ -89,17 +86,6 @@ namespace Opacbar
         public static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
 
         // ---- gdi ----
-        [DllImport("gdi32.dll")]
-        public static extern IntPtr CreateRoundRectRgn(int x1, int y1, int x2, int y2, int cx, int cy);
-
-        [DllImport("gdi32.dll")]
-        public static extern IntPtr CreateRectRgn(int x1, int y1, int x2, int y2);
-
-        [DllImport("gdi32.dll")]
-        public static extern int GetRgnBox(IntPtr hrgn, out RECT lprc);
-
-        [DllImport("gdi32.dll")]
-        public static extern bool DeleteObject(IntPtr hObject);
 
         [DllImport("gdi32.dll")]
         public static extern int GetDeviceCaps(IntPtr hdc, int nIndex);
@@ -169,6 +155,7 @@ namespace Opacbar
         public const int HT_CAPTION = 0x2;
 
         public const uint SMTO_ABORTIFHUNG = 0x0002;
+        public const int WM_COPYDATA = 0x004A;
         public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
 
         public static readonly IntPtr HWND_MESSAGE = new IntPtr(-3);
@@ -187,6 +174,14 @@ namespace Opacbar
 
             public int Width { get { return Right - Left; } }
             public int Height { get { return Bottom - Top; } }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct COPYDATASTRUCT
+        {
+            public IntPtr dwData;
+            public int cbData;
+            public IntPtr lpData;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -258,3 +253,4 @@ namespace Opacbar
         }
     }
 }
+

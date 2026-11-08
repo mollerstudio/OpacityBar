@@ -1,10 +1,13 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace Opacbar
 {
@@ -13,20 +16,61 @@ namespace Opacbar
         Idle = 0,       // nothing needed yet
         Missing = 1,    // helper DLL not found / unsupported arch
         Injecting = 2,  // injection in flight or waiting for the sink to appear
-        Alive = 3,      // at least one sink answered the ping
-        Failed = 4      // injection failed repeatedly
+        Alive = 3,      // at least one up-to-date sink answered
+        Failed = 4,     // injection failed repeatedly
+        Outdated = 5,   // an old (v1) helper is still loaded in Explorer
+        Rejected = 6    // the helper could not parse our rules
+    }
+
+    /// <summary>Hidden window that receives the helper's WM_COPYDATA tree dumps ('OTRE').</summary>
+    internal sealed class TapReceiver : NativeWindow
+    {
+        public const long DumpId = 0x4F545245; // 'OTRE'
+        public readonly List<string> Dumps = new List<string>();
+
+        public TapReceiver()
+        {
+            CreateHandle(new CreateParams());
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == NativeMethods.WM_COPYDATA)
+            {
+                try
+                {
+                    NativeMethods.COPYDATASTRUCT c = (NativeMethods.COPYDATASTRUCT)Marshal.PtrToStructure(m.LParam, typeof(NativeMethods.COPYDATASTRUCT));
+                    if (c.dwData.ToInt64() == DumpId && c.lpData != IntPtr.Zero && c.cbData > 0)
+                        Dumps.Add(Marshal.PtrToStringUni(c.lpData, c.cbData / 2));
+                }
+                catch { }
+                m.Result = (IntPtr)1;
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
+        public void Close()
+        {
+            if (Handle != IntPtr.Zero) DestroyHandle();
+        }
     }
 
     // Loads OpacbarTAP.<arch>.dll into explorer.exe through the XAML diagnostics API and talks to it
-    // via message-only "OpacbarTAP.Sink" windows.
+    // via message-only "OpacbarTAP.Sink" windows (protocol v2, see native/PROTOCOL.md).
     public sealed class TapHelper
     {
         private const uint WM_APP = 0x8000;
-        private const uint WM_TAP_APPLY = WM_APP + 0x10;
         private const uint WM_TAP_RESTORE = WM_APP + 0x11;
         private const uint WM_TAP_PING = WM_APP + 0x12;
+        private const uint WM_TAP_DUMP = WM_APP + 0x14;
+        private const uint WM_TAP_VERSION = WM_APP + 0x15;
         private const int PING_REPLY = 0x0BAC;
+        private const int ProtocolVersion = 2;
+        private const long RulesId = 0x4F504143; // 'OPAC'
+        private const long SendMinIntervalMs = 33; // ~30 sends/s while dragging
         private const string SinkClass = "OpacbarTAP.Sink";
+        private const string OutdatedDetail = "Restart Explorer to finish updating Opacbar";
         private static readonly Guid TapClsid = new Guid("6C3B1F0A-3D52-4E8B-9A41-0B5C2E7D9F11");
 
         private static int _endpointCounter = 0;
@@ -36,14 +80,14 @@ namespace Opacbar
         private string _detail = "";
 
         // desired state
-        private bool _wantActive;
-        private uint _wantArgb;
-        private uint _wantFlags;
-        private string _desiredKey = "";
+        private bool _wantStyled;
+        private string _desiredDoc = "";
 
-        // applied state
-        private string _appliedKey = "";
-        private string _appliedSinkKey = "";
+        // what each sink last received
+        private readonly Dictionary<long, string> _sent = new Dictionary<long, string>();
+        private long _lastSendMs = -100000;
+        private bool _pending;
+        private bool _ruleError;
 
         private long _lastPollMs = -100000;
         private long _nextAttemptMs = 0;
@@ -57,8 +101,14 @@ namespace Opacbar
         private string _threadError;
         private uint _injectedPid;
 
+        private volatile bool _restarting;
+        private TapReceiver _receiver;
+
         public TapStatus Status { get { return _status; } }
         public string Detail { get { return _detail; } }
+
+        /// <summary>True while a throttled send is waiting; the engine should call Sync again soon.</summary>
+        public bool HasPending { get { return _pending; } }
 
         public static string ArchName()
         {
@@ -113,6 +163,8 @@ namespace Opacbar
             return dst;
         }
 
+        // ---- sinks and messages ------------------------------------------------------
+
         private static List<IntPtr> FindSinks()
         {
             List<IntPtr> list = new List<IntPtr>();
@@ -126,66 +178,176 @@ namespace Opacbar
             return list;
         }
 
-        private static bool Send(IntPtr hwnd, uint msg, uint wParam, uint lParam, out int result)
+        private static bool Send(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam, uint timeoutMs, out int result)
         {
             UIntPtr res;
-            IntPtr ok = NativeMethods.SendMessageTimeout(hwnd, msg, new UIntPtr(wParam), new IntPtr((int)lParam),
-                NativeMethods.SMTO_ABORTIFHUNG, 500, out res);
+            IntPtr ok = NativeMethods.SendMessageTimeout(hwnd, msg, wParam, lParam,
+                NativeMethods.SMTO_ABORTIFHUNG, timeoutMs, out res);
             result = unchecked((int)res.ToUInt64());
             return ok != IntPtr.Zero;
         }
 
-        private static List<IntPtr> AliveSinks()
+        private static bool Send(IntPtr hwnd, uint msg, out int result)
         {
-            List<IntPtr> alive = new List<IntPtr>();
-            foreach (IntPtr s in FindSinks())
-            {
-                int r;
-                if (Send(s, WM_TAP_PING, 0, 0, out r) && r == PING_REPLY) alive.Add(s);
-            }
-            return alive;
+            return Send(hwnd, msg, UIntPtr.Zero, IntPtr.Zero, 1000, out result);
         }
 
-        // Call from the UI timer. active=false asks the helper to restore the stock look.
-        public void Sync(uint explorerPid, bool active, uint argb, uint flags)
+        private TapReceiver Receiver
         {
-            string key = active ? ("A" + argb + "/" + flags) : "R";
-            bool dirty = (key != _desiredKey);
-            _desiredKey = key;
-            _wantActive = active;
-            _wantArgb = argb;
-            _wantFlags = flags;
+            get
+            {
+                if (_receiver == null) _receiver = new TapReceiver();
+                return _receiver;
+            }
+        }
+
+        private static UIntPtr HandleArg(IntPtr h)
+        {
+            return new UIntPtr(unchecked((ulong)h.ToInt64()));
+        }
+
+        /// <summary>Sends a rules document as WM_COPYDATA. Returns the helper's reply, or int.MinValue if it did not answer.</summary>
+        private int SendRules(IntPtr sink, string doc)
+        {
+            int byteCount = doc.Length * 2;
+            IntPtr text = Marshal.StringToHGlobalUni(doc);
+            IntPtr cds = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(NativeMethods.COPYDATASTRUCT)));
+            try
+            {
+                NativeMethods.COPYDATASTRUCT c = new NativeMethods.COPYDATASTRUCT();
+                c.dwData = new IntPtr(RulesId);
+                c.cbData = byteCount;
+                c.lpData = text;
+                Marshal.StructureToPtr(c, cds, false);
+                int r;
+                if (!Send(sink, (uint)NativeMethods.WM_COPYDATA, HandleArg(Receiver.Handle), cds, 1000, out r)) return int.MinValue;
+                return r;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(cds);
+                Marshal.FreeHGlobal(text);
+            }
+        }
+
+        private static int SinkVersion(IntPtr sink)
+        {
+            int v;
+            if (!Send(sink, WM_TAP_VERSION, out v)) return -1;
+            return v;
+        }
+
+        // Call from the UI timer. styled=false means "stock look": no injection is needed and an empty document is sent.
+        public void Sync(uint explorerPid, bool styled, string doc)
+        {
+            if (doc == null) doc = TaskbarStyle.EmptyDocument();
+            bool dirty = (doc != _desiredDoc);
+            _desiredDoc = doc;
+            _wantStyled = styled;
 
             long now = Clock.ElapsedMilliseconds;
             CollectInjection(explorerPid, now);
 
-            if (!dirty && now - _lastPollMs < 1000) return;
+            if (_restarting) return;
+            if (!dirty && !_pending && now - _lastPollMs < 1000) return;
             _lastPollMs = now;
 
-            List<IntPtr> sinks = AliveSinks();
-            if (sinks.Count > 0)
+            List<IntPtr> good = new List<IntPtr>();
+            bool anyOld = false;
+            foreach (IntPtr s in FindSinks())
+            {
+                int r;
+                if (!Send(s, WM_TAP_PING, out r) || r != PING_REPLY) continue;
+                if (SinkVersion(s) >= ProtocolVersion) good.Add(s);
+                else anyOld = true;
+            }
+
+            if (good.Count > 0)
             {
                 _failCount = 0;
-                _status = TapStatus.Alive;
-                _detail = "";
-                StringBuilder sk = new StringBuilder();
-                foreach (IntPtr s in sinks) sk.Append(s.ToInt64()).Append(',');
-                string sinkKey = sk.ToString();
-                if (_appliedKey != _desiredKey || _appliedSinkKey != sinkKey)
+                HashSet<long> live = new HashSet<long>();
+                foreach (IntPtr s in good) live.Add(s.ToInt64());
+                List<long> stale = new List<long>();
+                foreach (long k in _sent.Keys) if (!live.Contains(k)) stale.Add(k);
+                foreach (long k in stale) _sent.Remove(k);
+
+                List<IntPtr> needs = new List<IntPtr>();
+                foreach (IntPtr s in good)
                 {
-                    SendToAll(sinks, active, argb, flags);
-                    _appliedKey = _desiredKey;
-                    _appliedSinkKey = sinkKey;
+                    string had;
+                    if (!_sent.TryGetValue(s.ToInt64(), out had) || had != doc) needs.Add(s);
+                }
+
+                if (needs.Count > 0)
+                {
+                    if (now - _lastSendMs < SendMinIntervalMs)
+                    {
+                        _pending = true; // the engine's fast timer calls Sync again
+                    }
+                    else
+                    {
+                        _pending = false;
+                        _lastSendMs = now;
+                        bool rejected = false;
+                        foreach (IntPtr s in needs)
+                        {
+                            int r = SendRules(s, doc);
+                            if (r < 0 && r != int.MinValue) rejected = true;
+                            if (r != int.MinValue) _sent[s.ToInt64()] = doc; // a rejected document is not resent until it changes
+                        }
+                        _ruleError = rejected;
+                    }
+                }
+                else
+                {
+                    _pending = false;
+                }
+
+                if (_ruleError)
+                {
+                    _status = TapStatus.Rejected;
+                    _detail = "The taskbar helper couldn't read the style rules.";
+                }
+                else
+                {
+                    _status = TapStatus.Alive;
+                    _detail = "";
                 }
                 return;
             }
 
-            _appliedSinkKey = "";
-            _appliedKey = "";
-            if (!active)
+            _sent.Clear();
+            _pending = false;
+
+            if (anyOld)
             {
-                if (_status == TapStatus.Alive) _status = TapStatus.Idle;
+                if (styled)
+                {
+                    _status = TapStatus.Outdated;
+                    _detail = OutdatedDetail;
+                }
+                else if (_status == TapStatus.Outdated || _status == TapStatus.Alive)
+                {
+                    _status = TapStatus.Idle;
+                    _detail = "";
+                }
                 return;
+            }
+
+            if (!styled)
+            {
+                if (_status == TapStatus.Alive || _status == TapStatus.Outdated || _status == TapStatus.Rejected)
+                {
+                    _status = TapStatus.Idle;
+                    _detail = "";
+                }
+                return;
+            }
+
+            if (_status == TapStatus.Outdated || _status == TapStatus.Rejected || _status == TapStatus.Alive)
+            {
+                _status = TapStatus.Idle;
+                _detail = "";
             }
 
             if (_thread != null) return; // injection running; wait for it
@@ -196,7 +358,7 @@ namespace Opacbar
             catch (Exception ex)
             {
                 _status = TapStatus.Failed;
-                _detail = "Couldn't prepare the transparency helper (" + ex.Message + ") — pill shape still works.";
+                _detail = "Couldn't prepare the taskbar helper (" + ex.Message + ").";
                 _nextAttemptMs = now + 30000;
                 return;
             }
@@ -204,8 +366,8 @@ namespace Opacbar
             {
                 _status = TapStatus.Missing;
                 _detail = (ArchName() == null)
-                    ? "This processor type isn't supported by the transparency helper — pill shape still works."
-                    : "Transparency helper not found next to Opacbar.exe — pill shape still works.";
+                    ? "This processor type isn't supported by the taskbar helper."
+                    : "Taskbar helper not found next to Opacbar.exe.";
                 _nextAttemptMs = now + 5000;
                 return;
             }
@@ -213,7 +375,7 @@ namespace Opacbar
 
             StartInjection(dll, explorerPid);
             _status = TapStatus.Injecting;
-            _detail = "Starting the transparency helper…";
+            _detail = "Starting the taskbar helper...";
         }
 
         private void StartInjection(string dll, uint pid)
@@ -257,7 +419,7 @@ namespace Opacbar
                 if (_failCount >= 5)
                 {
                     _status = TapStatus.Failed;
-                    _detail = "The transparency helper loaded but never answered — pill shape still works.";
+                    _detail = "The taskbar helper loaded but never answered.";
                     _nextAttemptMs = now + 30000;
                 }
             }
@@ -267,39 +429,184 @@ namespace Opacbar
                 int delay = _failCount >= 5 ? 30000 : Math.Min(15000, 1000 << (_failCount - 1));
                 _nextAttemptMs = now + delay;
                 _status = _failCount >= 5 ? TapStatus.Failed : TapStatus.Injecting;
-                _detail = "Couldn't load the transparency helper into Explorer (error 0x" +
-                          _threadHr.ToString("X8") + ")" +
-                          (_failCount >= 5 ? " — pill shape still works." : "; retrying…");
+                _detail = "Couldn't load the taskbar helper into Explorer (error 0x" +
+                          _threadHr.ToString("X8") + ")" + (_failCount >= 5 ? "." : "; retrying...");
             }
         }
 
-        private static void SendToAll(List<IntPtr> sinks, bool active, uint argb, uint flags)
-        {
-            foreach (IntPtr s in sinks)
-            {
-                int r;
-                if (active) Send(s, WM_TAP_APPLY, argb, flags, out r);
-                else Send(s, WM_TAP_RESTORE, 0, 0, out r);
-            }
-        }
-
-        // Immediately restore the stock taskbar look in every live sink.
+        // Immediately restore the stock taskbar look in every live sink (any protocol version).
         public void Restore()
         {
             try
             {
-                List<IntPtr> sinks = FindSinks();
-                foreach (IntPtr s in sinks)
+                foreach (IntPtr s in FindSinks())
                 {
                     int r;
-                    Send(s, WM_TAP_RESTORE, 0, 0, out r);
+                    Send(s, WM_TAP_RESTORE, out r);
                 }
             }
             catch { }
-            _wantActive = false;
-            _desiredKey = "R";
-            _appliedKey = "";
-            _appliedSinkKey = "";
+            _desiredDoc = "";
+            _sent.Clear();
+            _pending = false;
+            _ruleError = false;
+        }
+
+        public void Dispose()
+        {
+            if (_receiver != null)
+            {
+                try { _receiver.Close(); } catch { }
+                _receiver = null;
+            }
+        }
+
+        // ---- Explorer restart ---------------------------------------------------------
+
+        /// <summary>
+        /// Exits Explorer gracefully (WM_USER+436 to the taskbar), waits up to 3 s for a new shell, and starts one if needed.
+        /// Runs on a worker thread; the helper is re-injected by the normal Sync loop afterwards.
+        /// </summary>
+        public void RestartExplorer()
+        {
+            if (_restarting) return;
+            _restarting = true;
+            Thread t = new Thread(delegate ()
+            {
+                try
+                {
+                    IntPtr tray = NativeMethods.FindWindow("Shell_TrayWnd", null);
+                    uint pid = 0;
+                    if (tray != IntPtr.Zero) NativeMethods.GetWindowThreadProcessId(tray, out pid);
+
+                    if (tray != IntPtr.Zero) NativeMethods.PostMessage(tray, 0x5B4, IntPtr.Zero, IntPtr.Zero);
+
+                    long deadline = Clock.ElapsedMilliseconds + 3000;
+                    bool replaced = false;
+                    while (Clock.ElapsedMilliseconds < deadline)
+                    {
+                        Thread.Sleep(150);
+                        IntPtr nt = NativeMethods.FindWindow("Shell_TrayWnd", null);
+                        if (nt == IntPtr.Zero) continue;
+                        uint npid;
+                        NativeMethods.GetWindowThreadProcessId(nt, out npid);
+                        if (npid != pid) { replaced = true; break; }
+                    }
+
+                    if (!replaced && NativeMethods.FindWindow("Shell_TrayWnd", null) == IntPtr.Zero)
+                    {
+                        // Explorer exited but Windows did not bring the shell back: start it.
+                        try { Process.Start("explorer.exe"); } catch { }
+                        for (int i = 0; i < 20 && NativeMethods.FindWindow("Shell_TrayWnd", null) == IntPtr.Zero; i++) Thread.Sleep(150);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    _failCount = 0;
+                    _nextAttemptMs = 0;
+                    _lastPollMs = -100000;
+                    _restarting = false;
+                }
+            });
+            t.IsBackground = true;
+            t.Name = "OpacbarRestartExplorer";
+            t.Start();
+        }
+
+        public bool IsRestarting { get { return _restarting; } }
+
+        // ---- Taskbar map (developer) --------------------------------------------------
+
+        private static string ReadWindowsBuild()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion", false))
+                {
+                    if (k != null)
+                    {
+                        object b = k.GetValue("CurrentBuild");
+                        object u = k.GetValue("UBR");
+                        string s = b != null ? b.ToString() : "?";
+                        if (u != null) s += "." + u.ToString();
+                        return s;
+                    }
+                }
+            }
+            catch { }
+            return "unknown";
+        }
+
+        /// <summary>Asks every sink for its XAML tree and writes opacbar-taskbar-map.txt to the Desktop. UI thread only.</summary>
+        public bool SaveTaskbarMap(out string path, out string error)
+        {
+            path = null;
+            error = null;
+
+            List<IntPtr> good = new List<IntPtr>();
+            bool anyOld = false;
+            foreach (IntPtr s in FindSinks())
+            {
+                int r;
+                if (!Send(s, WM_TAP_PING, out r) || r != PING_REPLY) continue;
+                if (SinkVersion(s) >= ProtocolVersion) good.Add(s);
+                else anyOld = true;
+            }
+            if (good.Count == 0)
+            {
+                error = anyOld
+                    ? OutdatedDetail + ", then try again."
+                    : "The taskbar helper isn't running. Pick Clear, Color, Blur or Acrylic, wait a moment, and try again.";
+                return false;
+            }
+
+            TapReceiver rx = Receiver;
+            StringBuilder sb = new StringBuilder();
+            int dpi = UiNative.SystemDpi();
+            sb.AppendLine("opacbar-taskbar-map");
+            sb.AppendLine("Windows build: " + ReadWindowsBuild());
+            sb.AppendLine("DPI: " + dpi + " (" + Math.Round(dpi * 100.0 / 96.0) + "%)");
+            sb.AppendLine("Monitors: " + Screen.AllScreens.Length);
+            sb.AppendLine("Helper sinks: " + good.Count);
+            sb.AppendLine("Saved: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+
+            int got = 0;
+            for (int i = 0; i < good.Count; i++)
+            {
+                rx.Dumps.Clear();
+                int r;
+                Send(good[i], WM_TAP_DUMP, HandleArg(rx.Handle), IntPtr.Zero, 15000, out r);
+                sb.AppendLine();
+                sb.AppendLine("## sink " + (i + 1) + " of " + good.Count);
+                if (rx.Dumps.Count == 0)
+                {
+                    sb.AppendLine("(no data)");
+                    continue;
+                }
+                foreach (string d in rx.Dumps) { sb.AppendLine(d.TrimEnd('\r', '\n')); got++; }
+            }
+            if (got == 0)
+            {
+                error = "The helper sent no taskbar data. Try again in a moment.";
+                return false;
+            }
+
+            try
+            {
+                string dir = Path.Combine(Environment.GetEnvironmentVariable("USERPROFILE") ?? "", "Desktop");
+                if (!Directory.Exists(dir)) dir = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                string file = Path.Combine(dir, "opacbar-taskbar-map.txt");
+                File.WriteAllText(file, sb.ToString(), new UTF8Encoding(false));
+                path = file;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = "Couldn't write the map (" + ex.Message + ").";
+                return false;
+            }
         }
     }
 }
+

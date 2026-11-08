@@ -22,31 +22,23 @@ namespace Opacbar
         Paused = 1,
         NoTaskbar = 2,
         HelperMissing = 3,
-        HelperFailed = 4
+        HelperFailed = 4,
+        HelperOutdated = 5
     }
 
     public class TaskbarEngine : IDisposable
     {
-        private struct RegionState
-        {
-            public int Left, Top, Width, Height;
-            public int Dpi;
-            public int X1, Y1, X2, Y2, Diameter;
-            public bool Valid;
-        }
-
         private static readonly Stopwatch Clock = Stopwatch.StartNew();
 
         private AppConfig _config;
         private Timer _refreshTimer;
+        private Timer _fastTimer; // follows up throttled helper sends while a color is being dragged
         private TapHelper _tap = new TapHelper();
         private DynamicActivityState _lastDetectedState = DynamicActivityState.Desktop;
         private EngineHealth _health = EngineHealth.Ok;
         private string _healthDetail = "";
         private int _lastCount = -1;
 
-        private readonly Dictionary<IntPtr, RegionState> _regions = new Dictionary<IntPtr, RegionState>();
-        private readonly Dictionary<IntPtr, long> _regionCheckMs = new Dictionary<IntPtr, long>();
         private readonly Dictionary<IntPtr, string> _accentKeys = new Dictionary<IntPtr, string>();
         private readonly Dictionary<IntPtr, long> _accentMs = new Dictionary<IntPtr, long>();
         private readonly HashSet<IntPtr> _maximizedMonitors = new HashSet<IntPtr>();
@@ -69,6 +61,9 @@ namespace Opacbar
             _refreshTimer.Interval = ClampInterval(_config.RefreshRateMs);
             _refreshTimer.Tick += OnTick;
             _refreshTimer.Start();
+            _fastTimer = new Timer();
+            _fastTimer.Interval = 35;
+            _fastTimer.Tick += OnFastTick;
             ApplyImmediate(true);
         }
 
@@ -81,7 +76,8 @@ namespace Opacbar
         public void UpdateConfig(AppConfig config)
         {
             _config = config;
-            _refreshTimer.Interval = ClampInterval(_config.RefreshRateMs);
+            int iv = ClampInterval(_config.RefreshRateMs);
+            if (_refreshTimer.Interval != iv) _refreshTimer.Interval = iv;
             ApplyImmediate(true);
         }
 
@@ -89,6 +85,13 @@ namespace Opacbar
         {
             try { ApplyImmediate(false); }
             catch { }
+        }
+
+        private void OnFastTick(object sender, EventArgs e)
+        {
+            try { ApplyImmediate(false); }
+            catch { }
+            if (!_tap.HasPending && _fastTimer != null) _fastTimer.Stop();
         }
 
         private static long NowMs() { return Clock.ElapsedMilliseconds; }
@@ -121,7 +124,7 @@ namespace Opacbar
                     RestoreTaskbarsToDefault(taskbars);
                     _lastDetectedState = DynamicActivityState.Disabled;
                 }
-                SetHealth(EngineHealth.Paused, "Opacbar is paused — the taskbar is at its default look.");
+                SetHealth(EngineHealth.Paused, "Opacbar is paused. The taskbar is at its default look.");
                 NotifyIfChanged(DynamicActivityState.Disabled);
                 return;
             }
@@ -136,63 +139,42 @@ namespace Opacbar
             DynamicActivityState state = DetectDynamicState();
             StyleProfile profile = ResolveProfileForState(state);
 
-            // ---- accent (blur / acrylic / clear) ----
-            foreach (IntPtr hwnd in taskbars)
-            {
-                ApplyAccent(hwnd, profile, force, now);
-            }
-
-            // ---- background colour through the helper (Windows 11) ----
             EngineHealth health = EngineHealth.Ok;
             string detail = "";
             if (IsWindows11())
             {
-                bool active = profile.Mode != TaskbarStyleMode.Normal;
+                // Windows 11: everything goes through the XAML helper as brushes on the taskbar background.
+                bool styled = profile.Material != Material.Windows;
                 uint pid = 0;
                 NativeMethods.GetWindowThreadProcessId(taskbars[0], out pid);
-                uint argb = 0;
-                uint flags = 0;
-                if (active)
-                {
-                    int lum = Math.Max(0, Math.Min(255, profile.Luminance));
-                    int alpha;
-                    switch (profile.Mode)
-                    {
-                        case TaskbarStyleMode.Clear: alpha = 0; break;
-                        case TaskbarStyleMode.Solid: alpha = 255; break;
-                        default: alpha = (int)Math.Round(Math.Max(0, Math.Min(100, profile.Opacity)) * 255.0 / 100.0); break;
-                    }
-                    argb = ((uint)alpha << 24) | ((uint)lum << 16) | ((uint)lum << 8) | (uint)lum;
-                    flags = 1u | (profile.ShowTopLine ? 0u : 2u);
-                }
-                try { _tap.Sync(pid, active, argb, flags); }
+                try { _tap.Sync(pid, styled, TaskbarStyle.Compile(profile)); }
                 catch (Exception ex)
                 {
                     health = EngineHealth.HelperFailed;
-                    detail = "Transparency helper error (" + ex.Message + ") — pill shape still works.";
+                    detail = "Taskbar helper error (" + ex.Message + ").";
                 }
 
-                if (health == EngineHealth.Ok && active)
+                if (health == EngineHealth.Ok && styled)
                 {
-                    if (_tap.Status == TapStatus.Missing)
+                    switch (_tap.Status)
                     {
-                        health = EngineHealth.HelperMissing;
-                        detail = _tap.Detail;
+                        case TapStatus.Missing: health = EngineHealth.HelperMissing; detail = _tap.Detail; break;
+                        case TapStatus.Failed: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
+                        case TapStatus.Rejected: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
+                        case TapStatus.Outdated: health = EngineHealth.HelperOutdated; detail = _tap.Detail; break;
                     }
-                    else if (_tap.Status == TapStatus.Failed)
-                    {
-                        health = EngineHealth.HelperFailed;
-                        detail = _tap.Detail;
-                    }
+                }
+                if (_tap.HasPending && _fastTimer != null && !_fastTimer.Enabled) _fastTimer.Start();
+            }
+            else
+            {
+                // Windows 10 fallback: the DWM accent policy still works on the classic taskbar.
+                foreach (IntPtr hwnd in taskbars)
+                {
+                    ApplyAccent(hwnd, profile, force, now);
                 }
             }
             SetHealth(health, detail);
-
-            // ---- pill / corners ----
-            foreach (IntPtr hwnd in taskbars)
-            {
-                ApplyRegion(hwnd, force, now);
-            }
 
             NotifyIfChanged(state);
         }
@@ -236,8 +218,7 @@ namespace Opacbar
         private DynamicActivityState DetectDynamicState()
         {
             _maximizedMonitors.Clear();
-            bool needMax = _config.EnableMaximizedState || (_config.FloatingPillEnabled && _config.DockedWhenMaximized);
-            if (needMax) CollectMaximizedMonitors();
+            if (_config.EnableMaximizedState) CollectMaximizedMonitors();
 
             if (_config.EnableBatterySaverState && IsBatterySaverOn())
                 return DynamicActivityState.BatterySaver;
@@ -351,7 +332,7 @@ namespace Opacbar
             return list;
         }
 
-        // ------------------------------------------------------------------ accent
+        // ------------------------------------------------------------------ accent (Windows 10 only)
 
         private void ApplyAccent(IntPtr hwnd, StyleProfile p, bool force, long now)
         {
@@ -359,36 +340,46 @@ namespace Opacbar
             policy.AccentFlags = 2;
             policy.AnimationId = 0;
             policy.GradientColor = 0;
-            int lum = Math.Max(0, Math.Min(255, p.Luminance));
 
-            switch (p.Mode)
+            int rgb;
+            if (!TaskbarStyle.TryParseHex(p.Color, out rgb)) rgb = 0;
+            uint r = (uint)((rgb >> 16) & 0xFF), g = (uint)((rgb >> 8) & 0xFF), b = (uint)(rgb & 0xFF);
+            uint abgr = (b << 16) | (g << 8) | r;
+            int alpha = (int)Math.Round(Math.Max(0, Math.Min(100, p.Opacity)) * 255.0 / 100.0);
+
+            switch (p.Material)
             {
-                case TaskbarStyleMode.Blur:
+                case Material.Blur:
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_BLURBEHIND;
                     break;
-                case TaskbarStyleMode.Acrylic:
+                case Material.Acrylic:
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_ACRYLICBLURBEHIND;
-                    policy.GradientColor = 0x01000000u | ((uint)lum << 16) | ((uint)lum << 8) | (uint)lum;
+                    policy.GradientColor = ((uint)Math.Max(1, alpha) << 24) | abgr; // alpha >= 1 so it doesn't fall back to black
                     break;
-                case TaskbarStyleMode.Normal:
+                case Material.Color:
+                    policy.AccentState = alpha >= 255 ? NativeMethods.AccentState.ACCENT_ENABLE_GRADIENT : NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
+                    policy.GradientColor = ((uint)alpha << 24) | abgr;
+                    break;
+                case Material.Windows:
                     policy.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
                     policy.AccentFlags = 0;
                     break;
-                default: // Clear, Tinted, Solid
+                default: // Clear
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
                     break;
             }
 
+            bool stock = p.Material == Material.Windows;
             string key = policy.AccentState + "/" + policy.GradientColor;
             string prevKey;
             long prevMs;
-            if (!force && p.Mode == TaskbarStyleMode.Normal &&
+            if (!force && stock &&
                 _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key &&
                 _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 2000)
             {
                 return; // already default; don't poke it every tick
             }
-            if (!force && p.Mode != TaskbarStyleMode.Normal &&
+            if (!force && !stock &&
                 _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 240 &&
                 _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key)
             {
@@ -419,109 +410,7 @@ namespace Opacbar
             }
         }
 
-        // ------------------------------------------------------------------ region (pill)
-
-        private void ApplyRegion(IntPtr hwnd, bool force, long now)
-        {
-            NativeMethods.RECT rect;
-            if (!NativeMethods.GetWindowRect(hwnd, out rect)) return;
-            int width = rect.Width, height = rect.Height;
-            if (width <= 0 || height <= 0) return;
-
-            bool pill = _config.FloatingPillEnabled;
-            if (pill && _config.DockedWhenMaximized)
-            {
-                IntPtr mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-                if (_maximizedMonitors.Contains(mon)) pill = false;
-            }
-
-            RegionState prev;
-            bool hadPrev = _regions.TryGetValue(hwnd, out prev) && prev.Valid;
-
-            if (!pill)
-            {
-                if (hadPrev || force)
-                {
-                    NativeMethods.SetWindowRgn(hwnd, IntPtr.Zero, true);
-                    _regions.Remove(hwnd);
-                }
-                return;
-            }
-
-            int dpi = 96;
-            try { dpi = (int)NativeMethods.GetDpiForWindow(hwnd); } catch { }
-            if (dpi <= 0) dpi = 96;
-            double scale = dpi / 96.0;
-
-            int mx = (int)Math.Round(Math.Max(0, _config.HorizontalMargin) * scale);
-            int my = (int)Math.Round(Math.Max(0, _config.VerticalMargin) * scale);
-            mx = Math.Min(mx, (width * 2) / 5);
-            my = Math.Min(my, height / 3);
-
-            int x1 = mx, y1 = my, x2 = width - mx, y2 = height - my;
-            int pillH = y2 - y1;
-            int radius = (int)Math.Round(Math.Max(0, _config.CornerRadius) * scale);
-            radius = Math.Min(radius, pillH / 2);
-            int diameter = radius * 2;
-
-            RegionState cur = new RegionState();
-            cur.Left = rect.Left; cur.Top = rect.Top; cur.Width = width; cur.Height = height;
-            cur.Dpi = dpi; cur.X1 = x1; cur.Y1 = y1; cur.X2 = x2; cur.Y2 = y2; cur.Diameter = diameter;
-            cur.Valid = true;
-
-            bool same = hadPrev &&
-                prev.Left == cur.Left && prev.Top == cur.Top && prev.Width == cur.Width && prev.Height == cur.Height &&
-                prev.Dpi == cur.Dpi && prev.X1 == cur.X1 && prev.Y1 == cur.Y1 && prev.X2 == cur.X2 &&
-                prev.Y2 == cur.Y2 && prev.Diameter == cur.Diameter;
-
-            bool needApply = force || !same;
-            if (!needApply)
-            {
-                // safety check every ~2s: has explorer dropped or replaced our region?
-                long last;
-                if (!_regionCheckMs.TryGetValue(hwnd, out last) || now - last >= 2000)
-                {
-                    _regionCheckMs[hwnd] = now;
-                    needApply = !RegionMatches(hwnd, x1, y1, x2, y2);
-                }
-            }
-            if (!needApply) return;
-
-            IntPtr hRgn = (diameter <= 0)
-                ? NativeMethods.CreateRectRgn(x1, y1, x2, y2)
-                : NativeMethods.CreateRoundRectRgn(x1, y1, x2 + 1, y2 + 1, diameter, diameter);
-            if (hRgn == IntPtr.Zero) return;
-            if (NativeMethods.SetWindowRgn(hwnd, hRgn, true) == 0)
-            {
-                NativeMethods.DeleteObject(hRgn);
-                return;
-            }
-            _regions[hwnd] = cur;
-            _regionCheckMs[hwnd] = now;
-        }
-
-        private static bool RegionMatches(IntPtr hwnd, int x1, int y1, int x2, int y2)
-        {
-            IntPtr tmp = NativeMethods.CreateRectRgn(0, 0, 0, 0);
-            if (tmp == IntPtr.Zero) return true;
-            try
-            {
-                int type = NativeMethods.GetWindowRgn(hwnd, tmp);
-                if (type == 0) return false; // ERROR: no region set
-                NativeMethods.RECT box;
-                NativeMethods.GetRgnBox(tmp, out box);
-                // rect regions are exclusive on right/bottom; rounded ones were built with +1
-                return box.Left == x1 && box.Top == y1 &&
-                       (box.Right == x2 || box.Right == x2 + 1) &&
-                       (box.Bottom == y2 || box.Bottom == y2 + 1);
-            }
-            finally
-            {
-                NativeMethods.DeleteObject(tmp);
-            }
-        }
-
-        // ------------------------------------------------------------------ restore / dispose
+        // ------------------------------------------------------------------ restore / helper actions / dispose
 
         public void RestoreTaskbarsToDefault(List<IntPtr> taskbars = null)
         {
@@ -529,18 +418,30 @@ namespace Opacbar
 
             try { _tap.Restore(); } catch { }
 
-            NativeMethods.AccentPolicy off = new NativeMethods.AccentPolicy();
-            off.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
-            foreach (IntPtr hwnd in taskbars)
+            if (!IsWindows11())
             {
-                SetAccent(hwnd, off);
-                NativeMethods.SetWindowRgn(hwnd, IntPtr.Zero, true);
-                NativeMethods.InvalidateRect(hwnd, IntPtr.Zero, true);
+                NativeMethods.AccentPolicy off = new NativeMethods.AccentPolicy();
+                off.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
+                foreach (IntPtr hwnd in taskbars)
+                {
+                    SetAccent(hwnd, off);
+                    NativeMethods.InvalidateRect(hwnd, IntPtr.Zero, true);
+                }
             }
-            _regions.Clear();
-            _regionCheckMs.Clear();
             _accentKeys.Clear();
             _accentMs.Clear();
+        }
+
+        /// <summary>Restarts Explorer so a freshly updated helper replaces an old one.</summary>
+        public void RestartExplorer()
+        {
+            _tap.RestartExplorer();
+        }
+
+        /// <summary>Developer action: writes the taskbar XAML tree to the Desktop.</summary>
+        public bool SaveTaskbarMap(out string path, out string error)
+        {
+            return _tap.SaveTaskbarMap(out path, out error);
         }
 
         public void Dispose()
@@ -551,7 +452,14 @@ namespace Opacbar
                 _refreshTimer.Dispose();
                 _refreshTimer = null;
             }
+            if (_fastTimer != null)
+            {
+                _fastTimer.Stop();
+                _fastTimer.Dispose();
+                _fastTimer = null;
+            }
             RestoreTaskbarsToDefault();
+            _tap.Dispose();
         }
     }
 }

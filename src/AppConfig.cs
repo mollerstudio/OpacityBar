@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -6,6 +6,7 @@ using Microsoft.Win32;
 
 namespace Opacbar
 {
+    // Legacy (config v3 and older). Kept so old settings files still load; migrated to Material on load.
     public enum TaskbarStyleMode
     {
         Clear = 0,
@@ -16,80 +17,100 @@ namespace Opacbar
         Normal = 5
     }
 
+    public enum Material
+    {
+        Clear = 0,
+        Color = 1,
+        Blur = 2,
+        Acrylic = 3,
+        Windows = 4   // stock look: no rules are sent
+    }
+
     public class StyleProfile
     {
+        public Material Material { get; set; }
+        public string Color { get; set; }      // "#RRGGBB"
+        public int Opacity { get; set; }       // 0 - 100
+        public bool HideTopLine { get; set; }
+
+        // Legacy fields (config v3). Read only by the one-time migration; otherwise ignored.
         public TaskbarStyleMode Mode { get; set; }
-        public int Opacity { get; set; } // 0 - 100
-        public int Luminance { get; set; } // 0 (black) - 255 (white)
+        public int Luminance { get; set; }
         public bool ShowTopLine { get; set; }
 
         public StyleProfile()
         {
-            Mode = TaskbarStyleMode.Clear;
+            Material = Material.Clear;
+            Color = "#000000";
             Opacity = 0;
+            HideTopLine = true;
+            Mode = TaskbarStyleMode.Clear;
             Luminance = 0;
             ShowTopLine = false;
+        }
+
+        public StyleProfile(Material m, string color, int opacity) : this()
+        {
+            Material = m;
+            Color = color;
+            Opacity = opacity;
         }
 
         public StyleProfile Clone()
         {
             return new StyleProfile
             {
-                Mode = this.Mode,
+                Material = this.Material,
+                Color = this.Color,
                 Opacity = this.Opacity,
+                HideTopLine = this.HideTopLine,
+                Mode = this.Mode,
                 Luminance = this.Luminance,
                 ShowTopLine = this.ShowTopLine
             };
         }
 
+        /// <summary>Old Mode/Luminance model to the new one. Mode Tinted becomes Color, Solid becomes Color at 100%, Normal becomes Windows.</summary>
+        public void MigrateFromLegacy()
+        {
+            switch (Mode)
+            {
+                case TaskbarStyleMode.Acrylic: Material = Material.Acrylic; break;
+                case TaskbarStyleMode.Blur: Material = Material.Blur; break;
+                case TaskbarStyleMode.Tinted: Material = Material.Color; break;
+                case TaskbarStyleMode.Solid: Material = Material.Color; Opacity = 100; break;
+                case TaskbarStyleMode.Normal: Material = Material.Windows; break;
+                default: Material = Material.Clear; break;
+            }
+            int l = Math.Max(0, Math.Min(255, Luminance));
+            Color = "#" + l.ToString("X2") + l.ToString("X2") + l.ToString("X2");
+            HideTopLine = !ShowTopLine;
+        }
+
         public void Clamp()
         {
             Opacity = Math.Max(0, Math.Min(100, Opacity));
-            Luminance = Math.Max(0, Math.Min(255, Luminance));
-            if (!Enum.IsDefined(typeof(TaskbarStyleMode), Mode)) Mode = TaskbarStyleMode.Clear;
-        }
-
-        public uint ToAbgrColor()
-        {
-            int alpha = (int)Math.Round((Opacity / 100.0) * 255.0);
-            if (Mode == TaskbarStyleMode.Clear)
-            {
-                alpha = 0;
-            }
-            else if (Mode == TaskbarStyleMode.Solid)
-            {
-                alpha = 255;
-            }
-            else if (Mode == TaskbarStyleMode.Acrylic && alpha == 0)
-            {
-                // Acrylic requires alpha >= 1 on some Windows builds so it doesn't fall back to black
-                alpha = 1;
-            }
-
-            alpha = Math.Max(0, Math.Min(255, alpha));
-            int lum = Math.Max(0, Math.Min(255, Luminance));
-
-            uint a = (uint)alpha;
-            uint c = (uint)lum;
-
-            return (a << 24) | (c << 16) | (c << 8) | c;
+            if (!Enum.IsDefined(typeof(Material), Material)) Material = Material.Clear;
+            string n = TaskbarStyle.NormalizeHex(Color);
+            Color = n ?? "#000000";
         }
     }
 
     public class AppConfig
     {
-        public const int CurrentVersion = 3;
+        public const int CurrentVersion = 4;
+        public const int MaxRecentColors = 6;
 
         public int ConfigVersion { get; set; }
 
         // Master toggle
         public bool Enabled { get; set; }
 
-        // Floating bar and geometry
+        // Legacy floating-pill fields: still read from old files, ignored (real pills come later).
         public bool FloatingPillEnabled { get; set; }
-        public int CornerRadius { get; set; }      // 0 - 24 px
-        public int HorizontalMargin { get; set; }  // 0 - 64 px, side gap
-        public int VerticalMargin { get; set; }    // 0 - 12 px, bottom gap
+        public int CornerRadius { get; set; }
+        public int HorizontalMargin { get; set; }
+        public int VerticalMargin { get; set; }
         public bool DockedWhenMaximized { get; set; }
 
         // Situation profiles
@@ -101,12 +122,14 @@ namespace Opacbar
         public bool EnableBatterySaverState { get; set; }
         public StyleProfile BatterySaverProfile { get; set; }
 
+        // Recently used taskbar colors ("#RRGGBB"), newest first
+        public System.Collections.Generic.List<string> RecentColors { get; set; }
+
         // App preferences
         public int UiTheme { get; set; }           // 0 = follow Windows, 1 = dark, 2 = light
         public bool UILightTheme { get; set; }     // legacy (v2), migrated into UiTheme on load
         public bool LaunchAtStartup { get; set; }
         public int RefreshRateMs { get; set; }
-
         /// <summary>True when Load() found no settings file (first launch).</summary>
         public static bool IsFirstRun { get; private set; }
 
@@ -121,40 +144,19 @@ namespace Opacbar
             VerticalMargin = 4;
             DockedWhenMaximized = true;
 
-            DesktopProfile = new StyleProfile
-            {
-                Mode = TaskbarStyleMode.Clear,
-                Opacity = 0,
-                Luminance = 0,
-                ShowTopLine = false
-            };
+            DesktopProfile = new StyleProfile(Material.Clear, "#000000", 0);
 
-            EnableMaximizedState = true;
-            MaximizedProfile = new StyleProfile
-            {
-                Mode = TaskbarStyleMode.Acrylic,
-                Opacity = 70,
-                Luminance = 16,
-                ShowTopLine = false
-            };
+            // Off by default: the bar going dark on maximize confused people.
+            EnableMaximizedState = false;
+            MaximizedProfile = new StyleProfile(Material.Acrylic, "#101010", 70);
 
             EnableStartMenuState = false;
-            StartMenuProfile = new StyleProfile
-            {
-                Mode = TaskbarStyleMode.Acrylic,
-                Opacity = 70,
-                Luminance = 16,
-                ShowTopLine = false
-            };
+            StartMenuProfile = new StyleProfile(Material.Acrylic, "#101010", 70);
 
             EnableBatterySaverState = false;
-            BatterySaverProfile = new StyleProfile
-            {
-                Mode = TaskbarStyleMode.Solid,
-                Opacity = 100,
-                Luminance = 8,
-                ShowTopLine = false
-            };
+            BatterySaverProfile = new StyleProfile(Material.Color, "#080808", 100);
+
+            RecentColors = new System.Collections.Generic.List<string>();
 
             UiTheme = 0;
             UILightTheme = false;
@@ -179,6 +181,7 @@ namespace Opacbar
             StartMenuProfile = o.StartMenuProfile.Clone();
             EnableBatterySaverState = o.EnableBatterySaverState;
             BatterySaverProfile = o.BatterySaverProfile.Clone();
+            RecentColors = new System.Collections.Generic.List<string>(o.RecentColors ?? new System.Collections.Generic.List<string>());
             UiTheme = o.UiTheme;
             UILightTheme = o.UILightTheme;
             LaunchAtStartup = o.LaunchAtStartup;
@@ -187,9 +190,6 @@ namespace Opacbar
 
         public void Clamp()
         {
-            CornerRadius = Math.Max(0, Math.Min(24, CornerRadius));
-            HorizontalMargin = Math.Max(0, Math.Min(64, HorizontalMargin));
-            VerticalMargin = Math.Max(0, Math.Min(12, VerticalMargin));
             if (UiTheme < 0 || UiTheme > 2) UiTheme = 0;
             if (RefreshRateMs < 50) RefreshRateMs = 50;
             if (RefreshRateMs > 5000) RefreshRateMs = 5000;
@@ -201,8 +201,18 @@ namespace Opacbar
             MaximizedProfile.Clamp();
             StartMenuProfile.Clamp();
             BatterySaverProfile.Clamp();
-        }
 
+            System.Collections.Generic.List<string> clean = new System.Collections.Generic.List<string>();
+            if (RecentColors != null)
+            {
+                foreach (string c in RecentColors)
+                {
+                    string n = TaskbarStyle.NormalizeHex(c);
+                    if (n != null && !clean.Contains(n) && clean.Count < MaxRecentColors) clean.Add(n);
+                }
+            }
+            RecentColors = clean;
+        }
         // ---- Storage ---------------------------------------------------------------
 
         private static string ExeDirectory()
@@ -257,6 +267,15 @@ namespace Opacbar
                     // v2 -> v3: boolean light theme flag became the UiTheme choice.
                     if (result.UILightTheme) result.UiTheme = 2;
                     result.UILightTheme = false;
+                    result.ConfigVersion = CurrentVersion;
+                }
+                if (result.ConfigVersion < 4)
+                {
+                    // v3 -> v4: Mode/Luminance became Material/Color.
+                    if (result.DesktopProfile != null) result.DesktopProfile.MigrateFromLegacy();
+                    if (result.MaximizedProfile != null) result.MaximizedProfile.MigrateFromLegacy();
+                    if (result.StartMenuProfile != null) result.StartMenuProfile.MigrateFromLegacy();
+                    if (result.BatterySaverProfile != null) result.BatterySaverProfile.MigrateFromLegacy();
                     result.ConfigVersion = CurrentVersion;
                 }
                 result.Clamp();
@@ -395,3 +414,5 @@ namespace Opacbar
         }
     }
 }
+
+

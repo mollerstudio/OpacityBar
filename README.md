@@ -1,6 +1,6 @@
-# Opacbar
+﻿# Opacbar
 
-A small, open-source taskbar customizer for Windows 11 (and 10). An alternative to TranslucentTB with a monochrome UI and a floating "pill" taskbar.
+A small, open-source taskbar customizer for Windows 11 (and 10). An alternative to TranslucentTB with a monochrome UI and a color picker for your taskbar.
 
 Opacbar is a single portable `.exe` plus a tiny helper DLL. No installer, no admin rights, no network access.
 
@@ -8,9 +8,9 @@ Opacbar is a single portable `.exe` plus a tiny helper DLL. No installer, no adm
 
 ## Features
 
-- **Taskbar looks:** Clear, Tint, Blur, Acrylic, Solid, or Windows default.
+- **Taskbar looks:** Clear, Color, Blur, Acrylic, or Windows default. Pick any color with the built-in picker (saturation/value square, hue strip, hex, quick and recent swatches) and an opacity.
 - **True transparency on Windows 11:** only the taskbar's background is recolored, so icons, text and the clock stay fully opaque. A completely clear (alpha 0) background is possible.
-- **Floating pill:** detach the taskbar from the screen edge with adjustable corner radius, side insets and bottom gap.
+- **Floating pills:** in development.
 - **Per-situation looks:** use a different look when an app is maximized, when Start is open, or when battery saver is on.
 - **Tray icon:** left-click opens settings, right-click opens a quick menu.
 - **Emergency quit:** `Ctrl+Shift+Alt+Q` quits Opacbar and restores the stock taskbar.
@@ -31,7 +31,7 @@ Opacbar has nothing to hide, and the full source is in this repository.
 The helper:
 
 - finds the taskbar's background rectangles (`BackgroundFill` / `BackgroundStroke` inside `TaskbarBackground`) and changes **only their fill color**;
-- takes commands from Opacbar through an invisible message-only window (`OpacbarTAP.Sink`) using three messages: set color, restore, and ping;
+- takes a small text document of style rules from Opacbar through an invisible message-only window (`OpacbarTAP.Sink`); see [`native/PROTOCOL.md`](native/PROTOCOL.md);
 - puts the original Windows brush back when asked to restore;
 - does **not** use the network, write files or the registry, hook the keyboard or mouse, or read anything Explorer displays.
 
@@ -39,7 +39,7 @@ The top of the source file explains this in plain English. The helper is a singl
 
 Opacbar copies the helper to `%LocalAppData%\Opacbar\helper` before loading it, so the original next to the exe is never locked. The helper stays loaded until Explorer restarts. Restarting Explorer or signing out removes it completely.
 
-Floating pill geometry and the blur/acrylic effects use standard Win32/DWM window APIs and do not need the helper. If the helper is missing, everything else still works.
+Blur and Acrylic are drawn as XAML brushes by the same helper. On Windows 10 (build below 22000) Opacbar uses the classic DWM accent policy instead and needs no helper. If the helper is missing, Opacbar tells you and the taskbar keeps its stock look.
 
 ---
 
@@ -99,3 +99,4 @@ build.ps1 / build.bat Builds Opacbar.exe with the built-in csc
 ## License
 
 [MIT](LICENSE)
+

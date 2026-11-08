@@ -101,7 +101,7 @@ namespace Opacbar
 
         // Window
         public const int FlyoutWidth = 380;
-        public const int FlyoutMaxHeight = 560;
+        public const int FlyoutMaxHeight = 760;
         public const int FlyoutEdgeGap = 12;
 
         // Type scale (points; rendered as pt * 96/72 * scale pixels)
@@ -1095,6 +1095,549 @@ namespace Opacbar
     }
 
     // ------------------------------------------------------------------------------------
+    // Color picker. The chrome stays monochrome; the content (swatches, gradients) is full color.
+    // ------------------------------------------------------------------------------------
+    public static class ColorMath
+    {
+        public static Color FromHsv(float h, float s, float v)
+        {
+            h = h % 360f;
+            if (h < 0) h += 360f;
+            s = Math.Max(0f, Math.Min(1f, s));
+            v = Math.Max(0f, Math.Min(1f, v));
+            float c = v * s;
+            float x = c * (1f - Math.Abs((h / 60f) % 2f - 1f));
+            float m = v - c;
+            float r = 0, g = 0, b = 0;
+            if (h < 60) { r = c; g = x; }
+            else if (h < 120) { r = x; g = c; }
+            else if (h < 180) { g = c; b = x; }
+            else if (h < 240) { g = x; b = c; }
+            else if (h < 300) { r = x; b = c; }
+            else { r = c; b = x; }
+            return Color.FromArgb((int)Math.Round((r + m) * 255f), (int)Math.Round((g + m) * 255f), (int)Math.Round((b + m) * 255f));
+        }
+
+        public static void ToHsv(Color c, out float h, out float s, out float v)
+        {
+            float r = c.R / 255f, g = c.G / 255f, b = c.B / 255f;
+            float max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b));
+            float d = max - min;
+            v = max;
+            s = max <= 0f ? 0f : d / max;
+            if (d <= 0f) h = 0f;
+            else if (max == r) h = 60f * (((g - b) / d) % 6f);
+            else if (max == g) h = 60f * ((b - r) / d + 2f);
+            else h = 60f * ((r - g) / d + 4f);
+            if (h < 0f) h += 360f;
+        }
+
+        public static string Hex(Color c)
+        {
+            return "#" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2");
+        }
+
+        public static bool TryParse(string s, out Color c)
+        {
+            int rgb;
+            if (TaskbarStyle.TryParseHex(s, out rgb))
+            {
+                c = Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+                return true;
+            }
+            c = Color.Black;
+            return false;
+        }
+
+        public static Color Parse(string s, Color fallback)
+        {
+            Color c;
+            return TryParse(s, out c) ? c : fallback;
+        }
+    }
+
+    // The "Color" row: label left, color chip + hex + chevron right. Click expands the picker.
+    public class ColorSwatchRow : FlyoutControl
+    {
+        private Color _value = Color.Black;
+        private bool _expanded;
+        public string Label { get; set; }
+        public event EventHandler Clicked;
+
+        public ColorSwatchRow(string label)
+        {
+            Label = label;
+            SetStyle(ControlStyles.Selectable, true);
+            TabStop = true;
+            Cursor = Cursors.Hand;
+        }
+
+        public Color Value
+        {
+            get { return _value; }
+            set { _value = value; Invalidate(); }
+        }
+
+        public bool Expanded
+        {
+            get { return _expanded; }
+            set { if (_expanded != value) { _expanded = value; Invalidate(); } }
+        }
+
+        public override int GetPreferredHeight(int width) { return Theme.Px(36); }
+
+        protected override void OnClick(EventArgs e)
+        {
+            base.OnClick(e);
+            if (!Enabled) return;
+            Focus();
+            EventHandler h = Clicked;
+            if (h != null) h(this, EventArgs.Empty);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                OnClick(EventArgs.Empty);
+                e.Handled = true;
+            }
+        }
+
+        protected override void OnGotFocus(EventArgs e) { base.OnGotFocus(e); Invalidate(); }
+        protected override void OnLostFocus(EventArgs e) { base.OnLostFocus(e); Invalidate(); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Smooth(g);
+            Gfx.Text(g, Label, Theme.Body, new Rectangle(0, 0, Width / 2, Height), Ink(Theme.Text), Theme.Surface,
+                TextFormatFlags.VerticalCenter);
+
+            // right side, laid out from the edge: chevron, hex, chip
+            float chev = Theme.PxF(10);
+            float cx = Width - chev / 2f - Theme.PxF(2), cy = Height / 2f;
+            float dy = Theme.PxF(2.5f);
+            using (Pen p = new Pen(Ink(Theme.TextSecondary), Math.Max(1.25f, Theme.PxF(1.5f))))
+            {
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                p.LineJoin = LineJoin.Round;
+                float dir = _expanded ? -1f : 1f;
+                g.DrawLines(p, new PointF[] {
+                    new PointF(cx - chev * 0.35f, cy - dy * dir),
+                    new PointF(cx, cy + dy * dir),
+                    new PointF(cx + chev * 0.35f, cy - dy * dir) });
+            }
+
+            string hex = ColorMath.Hex(_value);
+            int hexW = Gfx.Measure(hex, Theme.Body) + Theme.Px(2);
+            int hexRight = (int)(cx - chev / 2f - Theme.PxF(8));
+            Gfx.Text(g, hex, Theme.Body, new Rectangle(hexRight - hexW, 0, hexW, Height), Ink(Theme.TextSecondary), Theme.Surface,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+
+            float chip = Theme.PxF(20);
+            RectangleF cr = new RectangleF(hexRight - hexW - Theme.PxF(8) - chip, (Height - chip) / 2f, chip, chip);
+            Gfx.FillRound(g, _value, cr, Theme.PxF(5));
+            Gfx.StrokeRound(g, Ink(Theme.TrackOff), cr, Theme.PxF(5), Math.Max(1f, Theme.PxF(1f)));
+
+            RectangleF ring = new RectangleF(0, 0, Width, Height);
+            FocusRing(g, ring, Theme.PxF(Theme.RadiusControl));
+        }
+    }
+
+    // Saturation/value square, hue strip, hex box and quick swatches.
+    public class ColorPickerPanel : FlyoutControl
+    {
+        private static readonly string[] QuickColors = new string[] { "#000000", "#FFFFFF", "#3A3A3A", "#808080", "#C8C8C8" };
+
+        private float _h, _s, _v;
+        private Bitmap _svBmp;
+        private float _svHue = -1f;
+        private readonly TextBox _hex = new TextBox();
+        private bool _hexError, _hexDirty, _settingText;
+        private int _drag; // 0 none, 1 saturation/value, 2 hue
+
+        /// <summary>Recently used colors ("#RRGGBB"), newest first. Owned by the config.</summary>
+        public System.Collections.Generic.List<string> Recents { get; set; }
+
+        /// <summary>Raised on every change, including while dragging.</summary>
+        public event EventHandler ColorChanged;
+        /// <summary>Raised when an edit ends (mouse up, swatch click, Enter or leaving the hex box).</summary>
+        public event EventHandler ColorCommitted;
+
+        public ColorPickerPanel()
+        {
+            Recents = new System.Collections.Generic.List<string>();
+            _v = 0f;
+            _hex.BorderStyle = BorderStyle.None;
+            _hex.MaxLength = 7;
+            _hex.CharacterCasing = CharacterCasing.Upper;
+            _hex.TabStop = true;
+            _hex.TextChanged += OnHexTextChanged;
+            _hex.KeyDown += OnHexKeyDown;
+            _hex.LostFocus += OnHexLostFocus;
+            Controls.Add(_hex);
+            SetColorInternal(Color.Black, true);
+        }
+
+        public Color Value
+        {
+            get { return ColorMath.FromHsv(_h, _s, _v); }
+            set
+            {
+                SetColorInternal(value, true);
+                Invalidate();
+            }
+        }
+
+        private void SetColorInternal(Color c, bool updateText)
+        {
+            float h, s, v;
+            ColorMath.ToHsv(c, out h, out s, out v);
+            if (s > 0.001f && v > 0.001f) _h = h; // keep the hue on grays and black so it doesn't jump
+            _s = s;
+            _v = v;
+            if (updateText) SetHexText(ColorMath.Hex(c));
+        }
+
+        private void SetHexText(string text)
+        {
+            if (_hex.Text == text && !_hexError) return;
+            _settingText = true;
+            try { _hex.Text = text; }
+            finally { _settingText = false; }
+            _hexError = false;
+        }
+
+        public override int GetPreferredHeight(int width)
+        {
+            int pad = Theme.Px(8);
+            return pad + Theme.Px(120) + Theme.Px(8) + Theme.Px(14) + Theme.Px(8) + Theme.Px(28) + Theme.Px(8) + Theme.Px(22) + pad;
+        }
+
+        // ---- geometry ----
+        private Rectangle SvRect()
+        {
+            int pad = Theme.Px(8);
+            return new Rectangle(pad, pad, Width - 2 * pad, Theme.Px(120));
+        }
+
+        private Rectangle HueRect()
+        {
+            Rectangle sv = SvRect();
+            return new Rectangle(sv.X, sv.Bottom + Theme.Px(8), sv.Width, Theme.Px(14));
+        }
+
+        private Rectangle HexBox()
+        {
+            Rectangle hue = HueRect();
+            return new Rectangle(hue.X, hue.Bottom + Theme.Px(8), Theme.Px(120), Theme.Px(28));
+        }
+
+        private int SwatchTop()
+        {
+            return HexBox().Bottom + Theme.Px(8);
+        }
+
+        private System.Collections.Generic.List<KeyValuePair<Rectangle, Color>> Swatches()
+        {
+            System.Collections.Generic.List<KeyValuePair<Rectangle, Color>> list = new System.Collections.Generic.List<KeyValuePair<Rectangle, Color>>();
+            int size = Theme.Px(22), gap = Theme.Px(6);
+            int x = Theme.Px(8), y = SwatchTop();
+            foreach (string q in QuickColors)
+            {
+                list.Add(new KeyValuePair<Rectangle, Color>(new Rectangle(x, y, size, size), ColorMath.Parse(q, Color.Black)));
+                x += size + gap;
+            }
+            x += Theme.Px(10);
+            if (Recents != null)
+            {
+                for (int i = 0; i < Recents.Count && i < AppConfig.MaxRecentColors; i++)
+                {
+                    Color c;
+                    if (!ColorMath.TryParse(Recents[i], out c)) continue;
+                    list.Add(new KeyValuePair<Rectangle, Color>(new Rectangle(x, y, size, size), c));
+                    x += size + gap;
+                }
+            }
+            return list;
+        }
+
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            Rectangle box = HexBox();
+            _hex.Font = Theme.Body;
+            _hex.BackColor = Theme.Raised;
+            _hex.ForeColor = Theme.Text;
+            int pad = Theme.Px(8);
+            _hex.Width = Math.Max(10, box.Width - 2 * pad);
+            _hex.Location = new Point(box.X + pad, box.Y + (box.Height - _hex.Height) / 2);
+        }
+
+        // ---- hex box ----
+        private void OnHexTextChanged(object sender, EventArgs e)
+        {
+            if (_settingText) return;
+            _hexDirty = true;
+            Color c;
+            if (ColorMath.TryParse(_hex.Text, out c))
+            {
+                _hexError = false;
+                SetColorInternal(c, false);
+                Invalidate();
+                RaiseChanged();
+            }
+            else
+            {
+                _hexError = true;
+                Invalidate(HexBox());
+            }
+        }
+
+        private void OnHexKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                e.Handled = true;
+                CommitHex();
+            }
+        }
+
+        private void OnHexLostFocus(object sender, EventArgs e)
+        {
+            CommitHex();
+        }
+
+        private void CommitHex()
+        {
+            if (!_hexDirty) return;
+            _hexDirty = false;
+            Color c;
+            if (ColorMath.TryParse(_hex.Text, out c))
+            {
+                SetHexText(ColorMath.Hex(c));
+                RaiseCommitted();
+            }
+            else
+            {
+                SetHexText(ColorMath.Hex(Value)); // revert to the last good color
+                Invalidate();
+            }
+        }
+
+        // ---- events ----
+        private void RaiseChanged()
+        {
+            EventHandler h = ColorChanged;
+            if (h != null) h(this, EventArgs.Empty);
+        }
+
+        private void RaiseCommitted()
+        {
+            EventHandler h = ColorCommitted;
+            if (h != null) h(this, EventArgs.Empty);
+        }
+
+        // ---- mouse ----
+        private void UpdateFromMouse(int x, int y)
+        {
+            if (_drag == 1)
+            {
+                Rectangle r = SvRect();
+                _s = Math.Max(0f, Math.Min(1f, (x - r.X) / (float)Math.Max(1, r.Width - 1)));
+                _v = 1f - Math.Max(0f, Math.Min(1f, (y - r.Y) / (float)Math.Max(1, r.Height - 1)));
+            }
+            else if (_drag == 2)
+            {
+                Rectangle r = HueRect();
+                _h = 360f * Math.Max(0f, Math.Min(0.9999f, (x - r.X) / (float)Math.Max(1, r.Width - 1)));
+            }
+            else return;
+            SetHexText(ColorMath.Hex(Value));
+            _hexDirty = false;
+            Invalidate();
+            RaiseChanged();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left || !Enabled) return;
+            Rectangle sv = SvRect();
+            Rectangle hue = HueRect();
+            hue.Inflate(0, Theme.Px(4));
+            if (sv.Contains(e.Location)) _drag = 1;
+            else if (hue.Contains(e.Location)) _drag = 2;
+            else
+            {
+                foreach (KeyValuePair<Rectangle, Color> sw in Swatches())
+                {
+                    if (sw.Key.Contains(e.Location))
+                    {
+                        SetColorInternal(sw.Value, true);
+                        _hexDirty = false;
+                        Invalidate();
+                        RaiseChanged();
+                        RaiseCommitted();
+                        return;
+                    }
+                }
+                return;
+            }
+            Capture = true;
+            UpdateFromMouse(e.X, e.Y);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            if (_drag != 0) UpdateFromMouse(e.X, e.Y);
+            else
+            {
+                bool over = false;
+                foreach (KeyValuePair<Rectangle, Color> sw in Swatches())
+                    if (sw.Key.Contains(e.Location)) { over = true; break; }
+                Cursor = (over || SvRect().Contains(e.Location) || HueRect().Contains(e.Location)) ? Cursors.Hand : Cursors.Default;
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            if (_drag != 0)
+            {
+                _drag = 0;
+                Capture = false;
+                RaiseCommitted();
+            }
+        }
+
+        // ---- painting ----
+        private void EnsureSvBitmap()
+        {
+            if (_svBmp != null && Math.Abs(_svHue - _h) < 0.01f) return;
+            const int W = 96, H = 64;
+            if (_svBmp == null) _svBmp = new Bitmap(W, H, PixelFormat.Format32bppRgb);
+            Color hc = ColorMath.FromHsv(_h, 1f, 1f);
+            BitmapData bd = _svBmp.LockBits(new Rectangle(0, 0, W, H), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+            try
+            {
+                byte[] row = new byte[W * 4];
+                for (int y = 0; y < H; y++)
+                {
+                    float v = 1f - y / (float)(H - 1);
+                    for (int x = 0; x < W; x++)
+                    {
+                        float s = x / (float)(W - 1);
+                        row[x * 4 + 0] = (byte)Math.Round(v * ((1f - s) * 255f + s * hc.B));
+                        row[x * 4 + 1] = (byte)Math.Round(v * ((1f - s) * 255f + s * hc.G));
+                        row[x * 4 + 2] = (byte)Math.Round(v * ((1f - s) * 255f + s * hc.R));
+                        row[x * 4 + 3] = 255;
+                    }
+                    Marshal.Copy(row, 0, new IntPtr(bd.Scan0.ToInt64() + (long)y * bd.Stride), row.Length);
+                }
+            }
+            finally
+            {
+                _svBmp.UnlockBits(bd);
+            }
+            _svHue = _h;
+        }
+
+        private void Thumb(Graphics g, float cx, float cy, Color fill)
+        {
+            float d = Theme.PxF(14);
+            Gfx.FillCircle(g, fill, cx, cy, d);
+            using (Pen dark = new Pen(Color.FromArgb(140, 0, 0, 0), Math.Max(1f, Theme.PxF(1f))))
+                g.DrawEllipse(dark, cx - d / 2f - Theme.PxF(1f), cy - d / 2f - Theme.PxF(1f), d + Theme.PxF(2f), d + Theme.PxF(2f));
+            using (Pen white = new Pen(Color.White, Math.Max(1.5f, Theme.PxF(2f))))
+                g.DrawEllipse(white, cx - d / 2f, cy - d / 2f, d, d);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Smooth(g);
+            RectangleF all = new RectangleF(0, 0, Width, Height);
+            Gfx.StrokeRound(g, Ink(Theme.Border), all, Theme.PxF(Theme.RadiusSegment), Math.Max(1f, Theme.PxF(1f)));
+
+            // saturation / value square
+            Rectangle sv = SvRect();
+            EnsureSvBitmap();
+            GraphicsState st = g.Save();
+            using (GraphicsPath clip = Gfx.RoundRect(sv, Theme.PxF(6)))
+            {
+                g.SetClip(clip, CombineMode.Replace);
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(_svBmp, sv);
+            }
+            g.Restore(st);
+            Smooth(g);
+            Gfx.StrokeRound(g, Theme.Border, sv, Theme.PxF(6), Math.Max(1f, Theme.PxF(1f)));
+            float sx = sv.X + _s * (sv.Width - 1), sy = sv.Y + (1f - _v) * (sv.Height - 1);
+            Thumb(g, sx, sy, Value);
+
+            // hue strip
+            Rectangle hue = HueRect();
+            using (GraphicsPath p = Gfx.RoundRect(hue, hue.Height / 2f))
+            using (LinearGradientBrush br = new LinearGradientBrush(hue, Color.Red, Color.Red, 0f))
+            {
+                ColorBlend cb = new ColorBlend(7);
+                cb.Colors = new Color[] { Color.FromArgb(255, 0, 0), Color.FromArgb(255, 255, 0), Color.FromArgb(0, 255, 0),
+                                          Color.FromArgb(0, 255, 255), Color.FromArgb(0, 0, 255), Color.FromArgb(255, 0, 255), Color.FromArgb(255, 0, 0) };
+                cb.Positions = new float[] { 0f, 1f / 6f, 2f / 6f, 3f / 6f, 4f / 6f, 5f / 6f, 1f };
+                br.InterpolationColors = cb;
+                g.FillPath(br, p);
+            }
+            float hx = hue.X + (_h / 360f) * (hue.Width - 1);
+            Thumb(g, hx, hue.Y + hue.Height / 2f, ColorMath.FromHsv(_h, 1f, 1f));
+
+            // hex box
+            Rectangle box = HexBox();
+            Gfx.FillRound(g, Theme.Raised, box, Theme.PxF(Theme.RadiusControl));
+            Gfx.StrokeRound(g, _hexError ? Theme.Error : Theme.Border, box, Theme.PxF(Theme.RadiusControl),
+                _hexError ? Math.Max(1.5f, Theme.PxF(1.5f)) : Math.Max(1f, Theme.PxF(1f)));
+            Rectangle hint = new Rectangle(box.Right + Theme.Px(8), box.Y, Math.Max(0, Width - box.Right - Theme.Px(16)), box.Height);
+            Gfx.Text(g, _hexError ? "Use #RRGGBB" : "Hex", Theme.Caption, hint, _hexError ? Theme.Error : Theme.TextSecondary,
+                Theme.Surface, TextFormatFlags.VerticalCenter);
+
+            // quick + recent swatches
+            Color cur = Value;
+            foreach (KeyValuePair<Rectangle, Color> sw in Swatches())
+            {
+                RectangleF r = sw.Key;
+                Gfx.FillRound(g, sw.Value, r, Theme.PxF(5));
+                bool selected = sw.Value.ToArgb() == cur.ToArgb();
+                if (selected)
+                {
+                    RectangleF ring = r;
+                    ring.Inflate(Theme.PxF(2), Theme.PxF(2));
+                    Gfx.StrokeRound(g, Theme.Text, ring, Theme.PxF(7), Math.Max(1.5f, Theme.PxF(1.5f)));
+                }
+                else
+                {
+                    Gfx.StrokeRound(g, Theme.TrackOff, r, Theme.PxF(5), Math.Max(1f, Theme.PxF(1f)));
+                }
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _svBmp != null)
+            {
+                _svBmp.Dispose();
+                _svBmp = null;
+            }
+            base.Dispose(disposing);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
     // Tray menu renderer (monochrome)
     // ------------------------------------------------------------------------------------
     public class MenuColors : ProfessionalColorTable
@@ -1234,5 +1777,6 @@ namespace Opacbar
         }
     }
 }
+
 
 

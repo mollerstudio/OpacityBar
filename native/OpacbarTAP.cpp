@@ -1,59 +1,72 @@
 // =====================================================================================
-//  OpacbarTAP.cpp - the small helper that Opacbar loads into explorer.exe
+//  OpacbarTAP.cpp - the small helper that Opacbar loads into explorer.exe  (protocol v2)
 // =====================================================================================
 //
 //  PLAIN-ENGLISH SUMMARY (read this first if you are auditing Opacbar)
 //  -------------------------------------------------------------------
-//  Windows 11 draws its taskbar with XAML. The colored "slab" behind your taskbar icons
-//  is a XAML Rectangle named "BackgroundFill" (plus a 1px line on top named
-//  "BackgroundStroke"), both inside a control called "TaskbarBackground". A normal app
-//  cannot reach into Explorer's XAML, so Opacbar uses Microsoft's official, documented
-//  XAML Diagnostics API (InitializeXamlDiagnosticsEx - the same API Visual Studio's Live
-//  Visual Tree and TranslucentTB use) to load this DLL into explorer.exe. This file is
-//  the complete source of that DLL.
+//  Windows 11 draws its taskbar with XAML. A normal app cannot reach into Explorer's
+//  XAML, so Opacbar uses Microsoft's official, documented XAML Diagnostics API
+//  (InitializeXamlDiagnosticsEx - the same API Visual Studio's Live Visual Tree and
+//  TranslucentTB use) to load this DLL into explorer.exe. This file is the complete
+//  source of that DLL. Its only job is GENERIC STYLING OF TASKBAR XAML ELEMENTS:
+//  changing properties such as a background brush, margin, corner radius or opacity of
+//  elements that live inside the taskbar / system tray XAML trees, and putting the
+//  original values back afterwards.
 //
 //  WHAT IT DOES
 //    1. Explorer's XAML runtime creates our COM object and hands it the "visual tree
-//       service" (IVisualTreeService).
-//    2. We subscribe to visual-tree change notifications. For every XAML element Explorer
-//       creates or removes we remember only: its handle (a number), its parent's handle
-//       (a number) and one bit saying "this is inside TaskbarBackground". We do NOT keep
-//       element names, text, or any content.
-//    3. When we see a Rectangle named BackgroundFill / BackgroundStroke inside
-//       TaskbarBackground, we remember it and create one invisible, message-only window
-//       (class "OpacbarTAP.Sink") on that taskbar's UI thread.
-//    4. Opacbar.exe finds those windows and sends them three messages:
-//         SET     - paint the background rectangle with a given ARGB color
-//                   (and optionally make the top stroke line transparent)
-//         RESTORE - put the original Windows brush back
-//         PING    - "are you alive?" (answers 0x0BAC)
-//    5. To paint, we ask the XAML runtime to create a SolidColorBrush from a string such as
-//       "#00000000" and assign it to the rectangle's Fill property. That is all.
-//       Because only the background rectangle is touched, taskbar icons, text and the
-//       clock stay 100% opaque, and a fully transparent (alpha 0) background is possible.
+//       service" (IVisualTreeService) and the diagnostics object (IXamlDiagnostics).
+//    2. We subscribe to visual-tree change notifications. For every XAML element we
+//       remember: its handle (a number), its parent's handle, its child index, the UI
+//       thread that owns it, and its XAML type name and x:Name (needed to match style
+//       rules such as "Taskbar.TaskbarBackground > *#BackgroundFill"). Type names and
+//       x:Names are interned in a small bounded table. No text content is ever read.
+//    3. On every UI thread that hosts a taskbar (a tree containing Taskbar.TaskbarFrame
+//       or SystemTray.SystemTrayFrame) we create one invisible, message-only window
+//       (class "OpacbarTAP.Sink").
+//    4. Opacbar.exe sends those windows (see native/PROTOCOL.md):
+//         RULES (WM_COPYDATA 'OPAC') - a list of "selector, property, value" rules.
+//                  We set those properties on the matching taskbar elements and restore
+//                  the original values of properties no longer targeted.
+//         RESTORE - put every original value back.
+//         DUMP    - send back a text outline of the taskbar element tree (types, x:Names,
+//                   sizes, margins, paddings, corner radii, background brushes) so the
+//                   user can write rules. Only to the window handle given by the caller.
+//         PING / VERSION - "are you alive?" / "which protocol do you speak?"
+//         SET     - the old v1 "paint the background rectangle" message (still works).
+//    5. Values are created by the XAML runtime itself: either from a short string
+//       (IVisualTreeService::CreateInstance, e.g. "#00000000" or "4,0,4,0") or from a
+//       XAML snippet (Windows.UI.Xaml.Markup.XamlReader.Load, e.g. an AcrylicBrush).
 //
 //  WHAT IT DOES NOT DO
 //    - No network access of any kind (no sockets, no HTTP, no WinINet/WinHTTP).
 //    - No file or registry reads or writes. No settings stored here at all.
 //    - No keyboard or mouse hooks, no keylogging, no screen capture, no clipboard access.
-//    - Does not read, store or send any text, names or content shown by Explorer.
-//    - Does not touch any XAML element other than the two taskbar background rectangles.
-//    - Does not start other processes, load other DLLs, or elevate privileges.
-//    - Talks only to whoever sends the three window messages above; the worst any other
-//      program could do through them is change the taskbar background color.
+//    - Does not read or send text content shown by Explorer (window titles, labels...).
+//      The DUMP only contains element type names, x:Names and layout/brush values.
+//    - Only modifies elements inside the taskbar / system tray trees.
+//    - Does not start processes, load other DLLs (combase.dll functions are looked up
+//      with GetModuleHandle - it is already loaded in Explorer) or elevate privileges.
+//    - Talks only to whoever sends the window messages above; the worst any other
+//      program could do through them is restyle the taskbar or read its element outline.
 //
 //  SAFETY RULES THIS FILE FOLLOWS (a crash here would crash Explorer)
 //    - Every HRESULT is checked; failures are skipped, never fatal.
 //    - No C++ exceptions are used or thrown (allocation uses nothrow / HeapAlloc).
 //    - All shared state is guarded by one critical section, and the lock is NEVER held
-//      while calling into XAML or creating windows.
+//      while calling into XAML, creating windows or sending messages.
+//    - Properties are only changed on the UI thread that owns the element (each sink
+//      window applies the rules to its own thread's elements).
 //    - Inside the tree-change callback we only update bookkeeping and post a message;
 //      the actual property changes happen later from our own window procedure.
+//    - Sizes are bounded: rules document <= 256 KB / 512 rules, <= 4096 applied
+//      properties, element map <= 262k slots, dump <= 20000 lines.
 //    - The DLL pins itself in memory once it has subscribed, so Explorer never unloads
 //      code that still has live callbacks or window procedures.
-//    - The XAML Diagnostics interfaces below are hand-declared (no SDK xamlom.h needed).
-//      Their IIDs, struct layouts and vtable order were checked against xamlom.idl as
-//      published in the Windows SDK / mingw-w64 headers. Do not reorder them.
+//    - The XAML Diagnostics and WinRT interfaces below are hand-declared (no SDK
+//      xamlom.h / WinRT headers needed). IIDs, struct layouts and vtable order were
+//      checked against xamlom.idl (Windows SDK / mingw-w64) and Windows.UI.Xaml.winmd.
+//      Do not reorder them.
 //
 //  Build (MSVC, from a VS developer prompt):
 //    cl /nologo /LD /O2 /EHs-c- /GS /W4 /DUNICODE /D_UNICODE native\OpacbarTAP.cpp ^
@@ -74,19 +87,30 @@
 #include <oleauto.h>
 #include <ocidl.h>
 #include <wchar.h>
+#include <stdlib.h>
 #include <new>
 
 // -------------------------------------------------------------------------------------
-//  IPC contract with Opacbar.exe (keep in sync with src/TapInjector.cs)
+//  IPC contract with Opacbar.exe (see native/PROTOCOL.md, keep in sync with src/*.cs)
 // -------------------------------------------------------------------------------------
-#define OPAC_SINK_CLASS   L"OpacbarTAP.Sink"
-#define WM_OPAC_SET       (WM_APP + 0x10)  // wParam = 0xAARRGGBB, lParam = flags. Returns #elements updated.
-#define WM_OPAC_RESTORE   (WM_APP + 0x11)  // Restores the original brushes. Returns #elements restored.
-#define WM_OPAC_PING      (WM_APP + 0x12)  // Returns OPAC_PING_REPLY.
-#define WM_OPAC_PENDING   (WM_APP + 0x13)  // Internal: apply the last SET state to newly found elements.
-#define OPAC_PING_REPLY   0x0BAC
-#define OPAC_FLAG_ON          0x1          // bit0: override on (0 = restore Windows defaults)
-#define OPAC_FLAG_HIDE_STROKE 0x2          // bit1: make BackgroundStroke transparent too
+#define OPAC_SINK_CLASS       L"OpacbarTAP.Sink"
+#define WM_OPAC_SET           (WM_APP + 0x10)  // v1: wParam = 0xAARRGGBB, lParam = flags.
+#define WM_OPAC_RESTORE       (WM_APP + 0x11)  // Restores everything. Returns #properties restored.
+#define WM_OPAC_PING          (WM_APP + 0x12)  // Returns OPAC_PING_REPLY.
+#define WM_OPAC_PENDING       (WM_APP + 0x13)  // Internal: (re)apply the current rules on this thread.
+#define WM_OPAC_DUMP          (WM_APP + 0x14)  // wParam = HWND to send the 'OTRE' dump to.
+#define WM_OPAC_VERSION       (WM_APP + 0x15)  // Returns OPAC_PROTOCOL_VERSION.
+#define OPAC_PING_REPLY       0x0BAC
+#define OPAC_PROTOCOL_VERSION 2
+#define OPAC_FLAG_ON          0x1              // v1 SET bit0: override on
+#define OPAC_FLAG_HIDE_STROKE 0x2              // v1 SET bit1: make BackgroundStroke transparent too
+#define OPAC_COPYDATA_RULES   0x4F504143       // 'OPAC'
+#define OPAC_COPYDATA_TREE    0x4F545245       // 'OTRE'
+#define OPAC_MAX_DOC_BYTES    (256 * 1024)
+#define OPAC_MAX_RULES        512
+#define OPAC_MAX_SEGS         16
+#define OPAC_MAX_DUMP_LINES   20000
+#define OPAC_MAX_DUMP_CHARS   ((SIZE_T)8 * 1024 * 1024)
 
 // CLSID of our TAP object: {6C3B1F0A-3D52-4E8B-9A41-0B5C2E7D9F11}
 static const GUID kCLSID_OpacbarTap =
@@ -99,6 +123,41 @@ static const GUID kIID_IClassFactory =
     { 0x00000001, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 static const GUID kIID_IObjectWithSite =   // {FC4801A3-2BA9-11CF-A229-00AA003D7352}
     { 0xfc4801a3, 0x2ba9, 0x11cf, { 0xa2, 0x29, 0x00, 0xaa, 0x00, 0x3d, 0x73, 0x52 } };
+
+// -------------------------------------------------------------------------------------
+//  Minimal hand-declared WinRT ABI (no WinRT headers needed)
+// -------------------------------------------------------------------------------------
+namespace winrtabi {
+
+struct HSTRING_OPAQUE__;                 // HSTRING is an opaque pointer
+typedef HSTRING_OPAQUE__* HSTR;
+
+// IInspectable {AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90}: IUnknown + 3 methods.
+struct IInspectableAbi : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetIids(ULONG* iidCount, IID** iids) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetRuntimeClassName(HSTR* className) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetTrustLevel(int* trustLevel) = 0;
+};
+
+// Windows.UI.Xaml.Markup.IXamlReaderStatics {9891C6BD-534F-4955-B85A-8A8DC0DCA602}
+// (verified against C:\Windows\System32\WinMetadata\Windows.UI.Xaml.winmd:
+//  methods Load(String) -> Object, LoadWithInitialTemplateValidation(String) -> Object)
+static const GUID IID_IXamlReaderStatics =
+    { 0x9891c6bd, 0x534f, 0x4955, { 0xb8, 0x5a, 0x8a, 0x8d, 0xc0, 0xdc, 0xa6, 0x02 } };
+struct IXamlReaderStatics : public IInspectableAbi {
+    virtual HRESULT STDMETHODCALLTYPE Load(HSTR xaml, IInspectableAbi** result) = 0;
+    virtual HRESULT STDMETHODCALLTYPE LoadWithInitialTemplateValidation(HSTR xaml, IInspectableAbi** result) = 0;
+};
+
+typedef HRESULT (WINAPI* PFN_WindowsCreateString)(const WCHAR* sourceString, UINT32 length, HSTR* string);
+typedef HRESULT (WINAPI* PFN_WindowsDeleteString)(HSTR string);
+typedef HRESULT (WINAPI* PFN_RoGetActivationFactory)(HSTR activatableClassId, REFIID iid, void** factory);
+
+} // namespace winrtabi
+
+using winrtabi::HSTR;
+using winrtabi::IInspectableAbi;
+using winrtabi::IXamlReaderStatics;
 
 // -------------------------------------------------------------------------------------
 //  Hand-declared subset of xamlom.h (XAML Diagnostics). Verified against xamlom.idl.
@@ -226,6 +285,20 @@ struct IVisualTreeService : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE ClearChildren(InstanceHandle parent) = 0;
 };
 
+// uuid(18c9e2b6-3f43-4116-9f2b-ff935d7770d2) - all 8 methods declared, in vtable order.
+static const GUID IID_IXamlDiagnostics =
+    { 0x18c9e2b6, 0x3f43, 0x4116, { 0x9f, 0x2b, 0xff, 0x93, 0x5d, 0x77, 0x70, 0xd2 } };
+struct IXamlDiagnostics : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetDispatcher(IInspectableAbi** dispatcher) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetUiLayer(IInspectableAbi** layer) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetApplication(IInspectableAbi** application) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetIInspectableFromHandle(InstanceHandle instanceHandle, IInspectableAbi** instance) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetHandleFromIInspectable(IInspectableAbi* instance, InstanceHandle* handle) = 0;
+    virtual HRESULT STDMETHODCALLTYPE HitTest(RECT rect, unsigned int* count, InstanceHandle** instanceHandles) = 0;
+    virtual HRESULT STDMETHODCALLTYPE RegisterInstance(IInspectableAbi* instance, InstanceHandle* instanceHandle) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetInitializationData(BSTR* initializationData) = 0;
+};
+
 } // namespace xamlom
 
 using namespace xamlom;
@@ -233,41 +306,159 @@ using namespace xamlom;
 // -------------------------------------------------------------------------------------
 //  Global state (all guarded by g_lock)
 // -------------------------------------------------------------------------------------
-static HMODULE            g_module   = NULL;
-static CRITICAL_SECTION   g_lock;
-static volatile LONG      g_objects  = 0;   // live TapObject instances
-static volatile LONG      g_locks    = 0;   // IClassFactory::LockServer count
-static volatile LONG      g_advised  = 0;   // 1 once AdviseVisualTreeChange is started/succeeded
-static volatile LONG      g_classOk  = 0;   // sink window class registered
-static IVisualTreeService* g_service = NULL; // kept for the life of the process once obtained
+static HMODULE             g_module   = NULL;
+static CRITICAL_SECTION    g_lock;
+static volatile LONG       g_objects  = 0;    // live TapObject instances
+static volatile LONG       g_locks    = 0;    // IClassFactory::LockServer count
+static volatile LONG       g_advised  = 0;    // 1 once AdviseVisualTreeChange is started/succeeded
+static volatile LONG       g_classOk  = 0;    // sink window class registered
+static IVisualTreeService* g_service  = NULL; // kept for the life of the process once obtained
+static IXamlDiagnostics*   g_diag     = NULL; // idem (may stay NULL: XAML values then fail)
 
 struct Locker {
     Locker()  { EnterCriticalSection(&g_lock); }
     ~Locker() { LeaveCriticalSection(&g_lock); }
 };
 
-// Last state requested by Opacbar.exe (applied to newly discovered elements too).
-struct OpacState {
-    UINT32 argb;
-    bool   overrideOn;
-    bool   hideStroke;
-};
-static OpacState g_state = { 0, false, false };
+static const UINT64 kFnvOffset = 14695981039346656037ULL;
+static const UINT64 kFnvPrime  = 1099511628211ULL;
 
-// ---- Element map: handle -> { parent, flags } (open addressing, no STL, no exceptions) ----
-#define NODE_IN_BG 0x1   // element is TaskbarBackground or one of its descendants
+static UINT64 HashChars(UINT64 h, const WCHAR* s, SIZE_T len)
+{
+    for (SIZE_T i = 0; i < len; i++) {
+        h ^= (UINT64)(UINT16)s[i];
+        h *= kFnvPrime;
+    }
+    return h;
+}
+
+static bool StrEq(const WCHAR* a, const WCHAR* b)
+{
+    return a && b && wcscmp(a, b) == 0;
+}
+
+static UINT64 ParseDecimal(const WCHAR* s)
+{
+    if (!s || !*s) return 0;
+    UINT64 v = 0;
+    for (; *s; s++) {
+        if (*s < L'0' || *s > L'9') return 0;
+        UINT64 d = (UINT64)(*s - L'0');
+        if (v > (0xFFFFFFFFFFFFFFFFULL - d) / 10) return 0;
+        v = v * 10 + d;
+    }
+    return v;
+}
+
+static bool IsSpace(WCHAR c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; }
+
+static WCHAR* Trim(WCHAR* s)
+{
+    while (*s && IsSpace(*s)) s++;
+    SIZE_T n = wcslen(s);
+    while (n > 0 && IsSpace(s[n - 1])) s[--n] = 0;
+    return s;
+}
+
+static void PinModule()
+{
+    HMODULE h = NULL;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                       (LPCWSTR)(void*)&PinModule, &h);
+}
+
+// -------------------------------------------------------------------------------------
+//  String interning (XAML type names, x:Names, property names). Bounded, never freed.
+// -------------------------------------------------------------------------------------
+#define ID_NONE          ((UINT16)0)        // empty string / no name
+#define ID_FAIL          ((UINT16)0xFFFF)   // could not intern (never matches a rule)
+#define POOL_MAX_STRINGS 16000u
+#define POOL_HASH_SIZE   32768u             // power of two, > 2 * POOL_MAX_STRINGS
+#define POOL_MAX_LEN     512u
+#define POOL_MAX_CHARS   ((SIZE_T)2 * 1024 * 1024)
+
+static WCHAR** g_poolStr   = NULL;   // [POOL_MAX_STRINGS], index = id
+static UINT16* g_poolHash  = NULL;   // [POOL_HASH_SIZE], 0 = empty
+static UINT32  g_poolCount = 1;      // id 0 reserved
+static SIZE_T  g_poolChars = 0;
+
+static UINT16 InternLocked(const WCHAR* s, SIZE_T len)
+{
+    if (!s || len == 0) return ID_NONE;
+    if (len > POOL_MAX_LEN) return ID_FAIL;
+    HANDLE heap = GetProcessHeap();
+    if (!g_poolStr) {
+        WCHAR** strs = (WCHAR**)HeapAlloc(heap, HEAP_ZERO_MEMORY, POOL_MAX_STRINGS * sizeof(WCHAR*));
+        UINT16* hash = (UINT16*)HeapAlloc(heap, HEAP_ZERO_MEMORY, POOL_HASH_SIZE * sizeof(UINT16));
+        if (!strs || !hash) {
+            if (strs) HeapFree(heap, 0, strs);
+            if (hash) HeapFree(heap, 0, hash);
+            return ID_FAIL;
+        }
+        g_poolStr = strs;
+        g_poolHash = hash;
+    }
+    const SIZE_T mask = POOL_HASH_SIZE - 1;
+    SIZE_T i = (SIZE_T)HashChars(kFnvOffset, s, len) & mask;
+    for (SIZE_T n = 0; n < POOL_HASH_SIZE; n++) {
+        UINT16 id = g_poolHash[i];
+        if (id == 0) break;
+        const WCHAR* p = g_poolStr[id];
+        if (wcsncmp(p, s, len) == 0 && p[len] == 0) return id;
+        i = (i + 1) & mask;
+    }
+    if (g_poolHash[i] != 0) return ID_FAIL;   // table full (cannot happen: load < 50%)
+    if (g_poolCount >= POOL_MAX_STRINGS || g_poolChars + len + 1 > POOL_MAX_CHARS) return ID_FAIL;
+    WCHAR* copy = (WCHAR*)HeapAlloc(heap, 0, (len + 1) * sizeof(WCHAR));
+    if (!copy) return ID_FAIL;
+    CopyMemory(copy, s, len * sizeof(WCHAR));
+    copy[len] = 0;
+    UINT16 id = (UINT16)g_poolCount++;
+    g_poolStr[id] = copy;
+    g_poolHash[i] = id;
+    g_poolChars += len + 1;
+    return id;
+}
+
+static UINT16 Intern(const WCHAR* s, SIZE_T len)
+{
+    Locker l;
+    return InternLocked(s, len);
+}
+
+// Strings are immutable once interned and the table never moves, so this is safe to
+// call without the lock for an id that was obtained under the lock.
+static const WCHAR* PoolStr(UINT16 id)
+{
+    if (id == ID_NONE) return L"";
+    if (id == ID_FAIL || !g_poolStr || id >= POOL_MAX_STRINGS || !g_poolStr[id]) return L"?";
+    return g_poolStr[id];
+}
+
+// -------------------------------------------------------------------------------------
+//  Element map: handle -> { parent, thread, child index, type, name, flags }
+//  (open addressing, no STL, no exceptions)
+// -------------------------------------------------------------------------------------
+#define SLOT_ROOT   0x1   // topmost known ancestor of a taskbar / tray frame
+#define SLOT_DOOMED 0x2   // temporary mark while erasing a subtree
 
 struct MapSlot {
     UINT64 key;
     UINT64 parent;
-    UINT32 flags;
-    UINT32 used;      // 0 = empty, 1 = live, 2 = deleted (tombstone)
+    DWORD  tid;          // UI thread that owns the element
+    UINT32 childIndex;   // index among the parent's children when it was added
+    UINT32 nChildren;    // known children (used to skip subtree scans on removal)
+    UINT16 typeId;
+    UINT16 nameId;
+    UINT16 flags;
+    UINT16 used;         // 0 = empty, 1 = live, 2 = deleted (tombstone)
 };
 static MapSlot* g_map      = NULL;
 static SIZE_T   g_mapCap   = 0;    // power of two
 static SIZE_T   g_mapLive  = 0;
 static SIZE_T   g_mapUsed  = 0;    // live + tombstones
-static const SIZE_T kMapMaxCap = (SIZE_T)1 << 18;   // 262k slots (~6 MB) hard ceiling
+static const SIZE_T kMapMaxCap = (SIZE_T)1 << 18;   // 262k slots (~10 MB) hard ceiling
+static const int    kMaxDepth  = 512;
 
 static SIZE_T HashKey(UINT64 k)
 {
@@ -308,11 +499,25 @@ static MapSlot* MapFind(UINT64 key)
     return NULL;
 }
 
-static void MapPut(UINT64 key, UINT64 parent, UINT32 flags)
+static void MapPut(UINT64 key, UINT64 parent, DWORD tid, UINT32 childIndex, UINT16 typeId, UINT16 nameId)
 {
     if (key == 0) return;
     MapSlot* existing = MapFind(key);
-    if (existing) { existing->parent = parent; existing->flags = flags; return; }
+    if (existing) {
+        UINT64 oldParent = existing->parent;
+        existing->parent = parent;
+        existing->tid = tid;
+        existing->childIndex = childIndex;
+        existing->typeId = typeId;
+        existing->nameId = nameId;
+        if (oldParent != parent) {
+            MapSlot* op = MapFind(oldParent);
+            if (op && op->nChildren) op->nChildren--;
+            MapSlot* np = MapFind(parent);
+            if (np) np->nChildren++;
+        }
+        return;
+    }
 
     if (!g_map || (g_mapUsed + 1) * 2 > g_mapCap) {
         SIZE_T want = 1024;
@@ -329,8 +534,11 @@ static void MapPut(UINT64 key, UINT64 parent, UINT32 flags)
         MapSlot* s = &g_map[i];
         if (s->used != 1) {
             if (s->used == 0) g_mapUsed++;
-            s->key = key; s->parent = parent; s->flags = flags; s->used = 1;
+            s->key = key; s->parent = parent; s->tid = tid; s->childIndex = childIndex;
+            s->nChildren = 0; s->typeId = typeId; s->nameId = nameId; s->flags = 0; s->used = 1;
             g_mapLive++;
+            MapSlot* p = MapFind(parent);
+            if (p) p->nChildren++;
             return;
         }
         i = (i + 1) & mask;
@@ -338,47 +546,430 @@ static void MapPut(UINT64 key, UINT64 parent, UINT32 flags)
     // Table completely full (only possible at kMapMaxCap): silently drop.
 }
 
-static void MapErase(UINT64 key)
+static void MapEraseSlot(MapSlot* s)
 {
-    MapSlot* s = MapFind(key);
-    if (!s) return;
+    if (!s || s->used != 1) return;
+    MapSlot* p = MapFind(s->parent);
+    if (p && p != s && p->nChildren) p->nChildren--;
     s->used = 2;
     s->key = 0;
+    s->flags = 0;
     g_mapLive--;
 }
 
-// ---- Target rectangles ----
-#define KIND_FILL   0
-#define KIND_STROKE 1
-#define MAX_TARGETS 64
+// Erases `root` and every known element below it.
+static void MapEraseSubtree(UINT64 root)
+{
+    MapSlot* r = MapFind(root);
+    if (!r) return;
+    if (r->nChildren) {
+        // Phase 1: mark (chains must stay intact while we walk them).
+        for (SIZE_T i = 0; i < g_mapCap; i++) {
+            MapSlot* s = &g_map[i];
+            if (s->used != 1 || s->key == root) continue;
+            UINT64 cur = s->parent;
+            for (int d = 0; d < kMaxDepth && cur != 0; d++) {
+                if (cur == root) { s->flags |= SLOT_DOOMED; break; }
+                MapSlot* p = MapFind(cur);
+                if (!p) break;
+                cur = p->parent;
+            }
+        }
+        // Phase 2: erase.
+        for (SIZE_T i = 0; i < g_mapCap; i++) {
+            MapSlot* s = &g_map[i];
+            if (s->used == 1 && (s->flags & SLOT_DOOMED)) MapEraseSlot(s);
+        }
+        r = MapFind(root);
+    }
+    MapEraseSlot(r);
+}
 
-struct Target {
-    UINT64 handle;      // 0 = free slot
-    UINT64 original;    // original local Fill brush handle (0 = none / use ClearProperty)
-    DWORD  tid;         // UI thread that owns the element
-    UINT32 fillIndex;   // property index of "Fill" (valid if resolved)
-    BYTE   kind;        // KIND_FILL / KIND_STROKE
-    BYTE   winui;       // 1 if Microsoft.UI.Xaml (WinUI 3) rather than Windows.UI.Xaml
-    BYTE   resolved;    // fillIndex/original captured
-    BYTE   overridden;  // we currently have our brush set on it
+// Marks the topmost known ancestor-or-self of `key` as a taskbar tree root.
+static void MarkRootLocked(UINT64 key)
+{
+    MapSlot* cur = MapFind(key);
+    if (!cur) return;
+    for (int d = 0; d < kMaxDepth && cur->parent != 0; d++) {
+        MapSlot* p = MapFind(cur->parent);
+        if (!p) break;
+        cur = p;
+    }
+    cur->flags |= SLOT_ROOT;
+}
+
+// True if the element or one of its known ancestors is a marked taskbar tree root.
+static bool InTaskbarTreeLocked(const MapSlot* s)
+{
+    for (int d = 0; d < kMaxDepth && s; d++) {
+        if (s->flags & SLOT_ROOT) return true;
+        if (s->parent == 0) return false;
+        s = MapFind(s->parent);
+    }
+    return false;
+}
+
+static bool HasMarkedAncestorLocked(const MapSlot* s)
+{
+    UINT64 cur = s->parent;
+    for (int d = 0; d < kMaxDepth && cur != 0; d++) {
+        const MapSlot* p = MapFind(cur);
+        if (!p) return false;
+        if (p->flags & SLOT_ROOT) return true;
+        cur = p->parent;
+    }
+    return false;
+}
+
+// True if `element` is `ancestor` or lies below it (according to the map).
+static bool IsUnderLocked(UINT64 element, UINT64 ancestor)
+{
+    UINT64 cur = element;
+    for (int d = 0; d < kMaxDepth && cur != 0; d++) {
+        if (cur == ancestor) return true;
+        const MapSlot* s = MapFind(cur);
+        if (!s) return false;
+        cur = s->parent;
+    }
+    return false;
+}
+
+static bool IsFrameType(const WCHAR* type)
+{
+    if (!type) return false;
+    return StrEq(type, L"Taskbar.TaskbarFrame") ||
+           StrEq(type, L"SystemTray.SystemTrayFrame") ||
+           wcsstr(type, L"TaskbarBackground") != NULL;   // fallback marker (v1 heuristic)
+}
+
+// -------------------------------------------------------------------------------------
+//  Rules
+// -------------------------------------------------------------------------------------
+static const BYTE kValClear = 0;   // "@clear"
+static const BYTE kValPlain = 1;   // CreateInstance(type, string)
+static const BYTE kValXaml  = 2;   // XamlReader.Load
+static const UINT16 kMatchDone = 0xFFFF;
+
+struct Seg {
+    UINT16 typeId;
+    UINT16 nameId;
+    INT32  index;     // -1 = any
+    BYTE   anyType;
+    BYTE   hasName;
+    BYTE   never;     // could not intern: never matches
+    BYTE   pad;
 };
-static Target g_targets[MAX_TARGETS];
 
-// ---- Per UI thread: sink window + small brush cache ----
+struct Rule {
+    Seg          segs[OPAC_MAX_SEGS];
+    UINT32       nSegs;
+    UINT16       propId;
+    BYTE         kind;
+    const WCHAR* value;      // points into RuleSet::text
+    UINT32       valueLen;
+    UINT64       valueHash;
+};
+
+struct RuleSet {
+    LONG   refs;     // guarded by g_lock
+    UINT32 gen;
+    UINT32 count;
+    WCHAR* text;
+    Rule*  rules;
+};
+
+static RuleSet* g_rules = NULL;
+static UINT32   g_gen   = 0;    // last rule-set generation (never 0 once assigned)
+static UINT32   g_pass  = 0;    // apply pass counter
+
+static void FreeRuleSet(RuleSet* rs)
+{
+    if (!rs) return;
+    HANDLE heap = GetProcessHeap();
+    if (rs->text) HeapFree(heap, 0, rs->text);
+    if (rs->rules) HeapFree(heap, 0, rs->rules);
+    HeapFree(heap, 0, rs);
+}
+
+static void ReleaseRules(RuleSet* rs)
+{
+    if (!rs) return;
+    bool last;
+    {
+        Locker l;
+        last = (--rs->refs == 0);
+    }
+    if (last) FreeRuleSet(rs);
+}
+
+static bool ParseSeg(WCHAR* s, Seg* g)
+{
+    g->index = -1;
+    SIZE_T len = wcslen(s);
+    if (len > 0 && s[len - 1] == L']') {
+        WCHAR* lb = wcsrchr(s, L'[');
+        if (!lb) return false;
+        s[len - 1] = 0;
+        WCHAR* num = Trim(lb + 1);
+        if (!*num) return false;
+        UINT32 v = 0;
+        for (WCHAR* p = num; *p; p++) {
+            if (*p < L'0' || *p > L'9') return false;
+            v = v * 10 + (UINT32)(*p - L'0');
+            if (v > 1000000) return false;
+        }
+        g->index = (INT32)v;
+        *lb = 0;
+    }
+    WCHAR* name = NULL;
+    WCHAR* hash = wcschr(s, L'#');
+    if (hash) { *hash = 0; name = hash + 1; }
+    WCHAR* type = Trim(s);
+    if (*type == 0 || (type[0] == L'*' && type[1] == 0)) {
+        if (*type == 0 && !name && g->index < 0) return false;   // empty segment
+        g->anyType = 1;
+    } else {
+        UINT16 id = Intern(type, wcslen(type));
+        if (id == ID_FAIL || id == ID_NONE) g->never = 1;
+        else g->typeId = id;
+    }
+    if (name) {
+        name = Trim(name);
+        g->hasName = 1;
+        if (*name) {
+            UINT16 id = Intern(name, wcslen(name));
+            if (id == ID_FAIL) g->never = 1;
+            else g->nameId = id;
+        } else {
+            g->nameId = ID_NONE;   // "Type#" = element without a name
+        }
+    }
+    return true;
+}
+
+static bool ParseSelector(WCHAR* sel, Rule* r)
+{
+    UINT32 n = 0;
+    WCHAR* cur = sel;
+    for (;;) {
+        WCHAR* gt = wcschr(cur, L'>');
+        if (gt) *gt = 0;
+        WCHAR* seg = Trim(cur);
+        if (!*seg || n >= OPAC_MAX_SEGS) return false;
+        if (!ParseSeg(seg, &r->segs[n])) return false;
+        n++;
+        if (!gt) break;
+        cur = gt + 1;
+    }
+    r->nSegs = n;
+    return n > 0;
+}
+
+static UINT64 HashValue(BYTE kind, const WCHAR* value, SIZE_T len)
+{
+    UINT64 h = kFnvOffset;
+    h ^= (UINT64)kind;
+    h *= kFnvPrime;
+    h = HashChars(h, value, len);
+    return h ? h : 1;
+}
+
+static bool ParseRuleLine(WCHAR* line, Rule* r)
+{
+    if (!*line) return false;
+    WCHAR* t1 = wcschr(line, L'\t');
+    if (!t1) return false;
+    *t1 = 0;
+    WCHAR* prop = t1 + 1;
+    WCHAR* t2 = wcschr(prop, L'\t');
+    if (!t2) return false;
+    *t2 = 0;
+    WCHAR* value = Trim(t2 + 1);
+    prop = Trim(prop);
+    if (!*prop || !*value) return false;
+    SIZE_T plen = wcslen(prop);
+    if (plen > 128) return false;
+    if (!ParseSelector(line, r)) return false;
+    UINT16 pid = Intern(prop, plen);
+    if (pid == ID_NONE || pid == ID_FAIL) return false;
+    r->propId = pid;
+    r->value = value;
+    r->valueLen = (UINT32)wcslen(value);
+    if (wcscmp(value, L"@clear") == 0) r->kind = kValClear;
+    else if (value[0] == L'<')         r->kind = kValXaml;
+    else                               r->kind = kValPlain;
+    r->valueHash = HashValue(r->kind, value, r->valueLen);
+    return true;
+}
+
+static WCHAR* NextLine(WCHAR* p, WCHAR** next)
+{
+    WCHAR* nl = wcschr(p, L'\n');
+    if (nl) { *nl = 0; *next = nl + 1; }
+    else *next = NULL;
+    SIZE_T len = wcslen(p);
+    if (len > 0 && p[len - 1] == L'\r') p[len - 1] = 0;
+    return p;
+}
+
+// Returns NULL on a bad header (*headerOk = false) or out of memory (*headerOk = true).
+static RuleSet* ParseRules(const WCHAR* data, SIZE_T nChars, bool* headerOk)
+{
+    *headerOk = false;
+    HANDLE heap = GetProcessHeap();
+    RuleSet* rs = (RuleSet*)HeapAlloc(heap, HEAP_ZERO_MEMORY, sizeof(RuleSet));
+    WCHAR* text = (WCHAR*)HeapAlloc(heap, 0, (nChars + 1) * sizeof(WCHAR));
+    Rule* rules = (Rule*)HeapAlloc(heap, HEAP_ZERO_MEMORY, OPAC_MAX_RULES * sizeof(Rule));
+    if (!rs || !text || !rules) {
+        if (rs) HeapFree(heap, 0, rs);
+        if (text) HeapFree(heap, 0, text);
+        if (rules) HeapFree(heap, 0, rules);
+        // Can't tell whether the header was fine; report it as such so callers return 0.
+        *headerOk = true;
+        return NULL;
+    }
+    if (nChars) CopyMemory(text, data, nChars * sizeof(WCHAR));
+    text[nChars] = 0;
+    rs->text = text;
+    rs->rules = rules;
+
+    WCHAR* p = text;
+    if (*p == 0xFEFF) p++;
+    WCHAR* next = NULL;
+    WCHAR* header = Trim(NextLine(p, &next));
+    if (wcscmp(header, L"opacbar-rules 2") != 0) {
+        FreeRuleSet(rs);
+        return NULL;
+    }
+    *headerOk = true;
+    while (next && rs->count < OPAC_MAX_RULES) {
+        WCHAR* line = NextLine(next, &next);
+        if (ParseRuleLine(line, &rules[rs->count])) rs->count++;
+        else ZeroMemory(&rules[rs->count], sizeof(Rule));
+    }
+    return rs;
+}
+
+static bool SegMatch(const Seg& g, const MapSlot* s)
+{
+    if (g.never) return false;
+    if (!g.anyType && s->typeId != g.typeId) return false;
+    if (g.hasName && s->nameId != g.nameId) return false;
+    if (g.index >= 0 && s->childIndex != (UINT32)g.index) return false;
+    return true;
+}
+
+// Selector semantics (PROTOCOL.md): last segment = target, middle segments = direct
+// parents in order, first segment = nearest ancestor (any distance) satisfying it.
+static bool MatchRuleLocked(const MapSlot* e, const Rule& r)
+{
+    const UINT32 k = r.nSegs;
+    if (k == 0 || !SegMatch(r.segs[k - 1], e)) return false;
+    const MapSlot* cur = e;
+    for (int i = (int)k - 2; i >= 1; i--) {
+        if (cur->parent == 0) return false;
+        cur = MapFind(cur->parent);
+        if (!cur || !SegMatch(r.segs[i], cur)) return false;
+    }
+    if (k >= 2) {
+        UINT64 p = cur->parent;
+        for (int d = 0; d < kMaxDepth && p != 0; d++) {
+            const MapSlot* a = MapFind(p);
+            if (!a) return false;
+            if (SegMatch(r.segs[0], a)) return true;
+            p = a->parent;
+        }
+        return false;
+    }
+    return true;
+}
+
+// -------------------------------------------------------------------------------------
+//  Applied records: one per (element, property) we changed, with the exact original.
+// -------------------------------------------------------------------------------------
+#define MAX_RECORDS 4096
+static const BYTE kOrigNone   = 0;   // restore with ClearProperty
+static const BYTE kOrigHandle = 1;   // original local value was an object handle
+static const BYTE kOrigString = 2;   // original local value was a plain value (type + string)
+
+struct Record {
+    UINT64           element;      // 0 = free slot
+    DWORD            tid;
+    UINT16           propId;
+    BYTE             origKind;
+    BYTE             valueKind;
+    UINT32           propIndex;
+    UINT32           gen;          // rule-set generation last applied (0 = reserved, not applied)
+    UINT32           pass;         // last apply pass that kept this record
+    UINT64           valueHash;
+    UINT64           valueHandle;  // handle we set (0 for @clear)
+    UINT64           origHandle;
+    BSTR             origType;
+    BSTR             origValue;
+    IInspectableAbi* xamlObj;      // one reference to a XamlReader-created value we set
+};
+static Record g_recs[MAX_RECORDS];
+static UINT32 g_recHigh = 0;   // records live in [0, g_recHigh)
+
+static Record* FindRecordLocked(UINT64 element, UINT16 propId)
+{
+    for (UINT32 i = 0; i < g_recHigh; i++)
+        if (g_recs[i].element == element && g_recs[i].propId == propId) return &g_recs[i];
+    return NULL;
+}
+
+static Record* AllocRecordLocked()
+{
+    for (UINT32 i = 0; i < MAX_RECORDS; i++) {
+        if (g_recs[i].element == 0) {
+            ZeroMemory(&g_recs[i], sizeof(Record));
+            if (i + 1 > g_recHigh) g_recHigh = i + 1;
+            return &g_recs[i];
+        }
+    }
+    return NULL;
+}
+
+// Frees what a record owns. Must be called WITHOUT g_lock (may release a XAML object).
+static void FreeRecordResources(Record& r, bool releaseObject)
+{
+    SysFreeString(r.origType);
+    SysFreeString(r.origValue);
+    r.origType = NULL;
+    r.origValue = NULL;
+    if (r.xamlObj && releaseObject) r.xamlObj->Release();
+    r.xamlObj = NULL;
+}
+
+// Thread went away (or its id got reused): forget its records without touching XAML.
+// XAML objects are deliberately leaked: their UI thread is gone, releasing them is unsafe.
+static void DropThreadRecordsLocked(DWORD tid)
+{
+    for (UINT32 i = 0; i < g_recHigh; i++) {
+        Record& r = g_recs[i];
+        if (r.element == 0 || r.tid != tid) continue;
+        SysFreeString(r.origType);
+        SysFreeString(r.origValue);
+        ZeroMemory(&r, sizeof(Record));
+    }
+}
+
+// -------------------------------------------------------------------------------------
+//  Per UI thread: sink window + small cache of plain values created with CreateInstance
+// -------------------------------------------------------------------------------------
 #define MAX_THREADS 32
-#define MAX_BRUSHES 16
+#define VALUE_CACHE 32
 
-struct BrushEntry {
+struct CachedValue {
+    UINT64 hash;      // 0 = empty
     UINT64 handle;
-    UINT32 argb;
-    BYTE   winui;
 };
 struct ThreadState {
-    DWORD      tid;     // 0 = free slot
-    HWND       sink;
-    BrushEntry brushes[MAX_BRUSHES];
-    UINT32     nBrushes;
-    UINT32     nextEvict;
+    DWORD       tid;            // 0 = free slot
+    HWND        sink;
+    BOOL        pendingPosted;  // a WM_OPAC_PENDING is already queued
+    UINT32      nextEvict;
+    CachedValue cache[VALUE_CACHE];
 };
 static ThreadState g_threads[MAX_THREADS];
 
@@ -403,277 +994,883 @@ static ThreadState* FindOrAddThread(DWORD tid)
     return NULL;
 }
 
-static Target* FindTarget(UINT64 handle)
-{
-    if (handle == 0) return NULL;
-    for (int i = 0; i < MAX_TARGETS; i++)
-        if (g_targets[i].handle == handle) return &g_targets[i];
-    return NULL;
-}
-
-static bool AddTarget(UINT64 handle, DWORD tid, BYTE kind, BYTE winui)
-{
-    Target* t = FindTarget(handle);
-    if (t) { t->tid = tid; t->kind = kind; t->winui = winui; return true; }
-    for (int i = 0; i < MAX_TARGETS; i++) {
-        if (g_targets[i].handle == 0) {
-            ZeroMemory(&g_targets[i], sizeof(Target));
-            g_targets[i].handle = handle;
-            g_targets[i].tid = tid;
-            g_targets[i].kind = kind;
-            g_targets[i].winui = winui;
-            return true;
-        }
-    }
-    return false;
-}
-
-// Drop every target that is `removed` or lives somewhere underneath it.
-static void DropTargetsUnder(UINT64 removed)
-{
-    for (int i = 0; i < MAX_TARGETS; i++) {
-        UINT64 cur = g_targets[i].handle;
-        if (cur == 0) continue;
-        for (int depth = 0; depth < 256 && cur != 0; depth++) {
-            if (cur == removed) { ZeroMemory(&g_targets[i], sizeof(Target)); break; }
-            MapSlot* s = MapFind(cur);
-            if (!s) break;
-            cur = s->parent;
-        }
-    }
-}
-
 // -------------------------------------------------------------------------------------
-//  Small helpers (no CRT formatting needed)
+//  WinRT entry points (looked up in the already loaded combase.dll)
 // -------------------------------------------------------------------------------------
-static void FormatArgb(UINT32 argb, WCHAR out[10])
-{
-    static const WCHAR hex[] = L"0123456789ABCDEF";
-    out[0] = L'#';
-    for (int i = 0; i < 8; i++) out[1 + i] = hex[(argb >> (28 - 4 * i)) & 0xF];
-    out[9] = 0;
-}
+struct WinRtFns {
+    winrtabi::PFN_WindowsCreateString   create;
+    winrtabi::PFN_WindowsDeleteString   del;
+    winrtabi::PFN_RoGetActivationFactory getFactory;
+};
+static WinRtFns g_winrt;
+static int      g_winrtState = 0;   // 0 = not resolved yet, 1 = ok, 2 = unavailable
 
-static UINT64 ParseDecimal(const WCHAR* s)
+static bool ResolveWinRt(WinRtFns* out)
 {
-    if (!s || !*s) return 0;
-    UINT64 v = 0;
-    for (; *s; s++) {
-        if (*s < L'0' || *s > L'9') return 0;
-        UINT64 d = (UINT64)(*s - L'0');
-        if (v > (0xFFFFFFFFFFFFFFFFULL - d) / 10) return 0;
-        v = v * 10 + d;
+    Locker l;
+    if (g_winrtState == 0) {
+        HMODULE m = GetModuleHandleW(L"combase.dll");
+        if (m) {
+            g_winrt.create = reinterpret_cast<winrtabi::PFN_WindowsCreateString>(
+                GetProcAddress(m, "WindowsCreateString"));
+            g_winrt.del = reinterpret_cast<winrtabi::PFN_WindowsDeleteString>(
+                GetProcAddress(m, "WindowsDeleteString"));
+            g_winrt.getFactory = reinterpret_cast<winrtabi::PFN_RoGetActivationFactory>(
+                GetProcAddress(m, "RoGetActivationFactory"));
+        }
+        g_winrtState = (g_winrt.create && g_winrt.del && g_winrt.getFactory) ? 1 : 2;
     }
-    return v;
-}
-
-static bool StrEq(const WCHAR* a, const WCHAR* b)
-{
-    return a && b && wcscmp(a, b) == 0;
-}
-
-static bool IsRectangleType(const WCHAR* type, BYTE* winui)
-{
-    if (StrEq(type, L"Windows.UI.Xaml.Shapes.Rectangle"))   { *winui = 0; return true; }
-    if (StrEq(type, L"Microsoft.UI.Xaml.Shapes.Rectangle")) { *winui = 1; return true; }
-    return false;
-}
-
-static void PinModule()
-{
-    HMODULE h = NULL;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-                       (LPCWSTR)(void*)&PinModule, &h);
+    if (g_winrtState != 1) return false;
+    *out = g_winrt;
+    return true;
 }
 
 // -------------------------------------------------------------------------------------
 //  XAML property helpers (call WITHOUT holding g_lock, on the element's UI thread)
 // -------------------------------------------------------------------------------------
+struct Chain {
+    unsigned int         srcCount;
+    PropertyChainSource* srcs;
+    unsigned int         propCount;
+    PropertyChainValue*  vals;
+};
 
-// Finds the "Fill" property index and, if the current Fill is a local value that is an
-// object handle, that original brush handle so we can put it back exactly later.
-static bool ResolveFill(IVisualTreeService* svc, UINT64 element, UINT32* fillIndex, UINT64* original)
+static void ChainFree(Chain* c)
 {
-    unsigned int srcCount = 0, propCount = 0;
-    PropertyChainSource* srcs = NULL;
-    PropertyChainValue* vals = NULL;
-
-    HRESULT hr = svc->GetPropertyValuesChain(element, &srcCount, &srcs, &propCount, &vals);
-    if (FAILED(hr)) return false;
-
-    int first = -1, effective = -1;
-    if (vals) {
-        for (unsigned int i = 0; i < propCount; i++) {
-            if (!StrEq(vals[i].PropertyName, L"Fill")) continue;
-            if (first < 0) first = (int)i;
-            if (!vals[i].Overridden && effective < 0) effective = (int)i;
+    if (c->srcs) {
+        for (unsigned int i = 0; i < c->srcCount; i++) {
+            SysFreeString(c->srcs[i].TargetType);
+            SysFreeString(c->srcs[i].Name);
+            SysFreeString(c->srcs[i].SrcInfo.FileName);
+            SysFreeString(c->srcs[i].SrcInfo.Hash);
         }
+        CoTaskMemFree(c->srcs);
     }
-
-    bool ok = false;
-    if (first >= 0) {
-        *fillIndex = vals[first].Index;
-        *original = 0;
-        if (effective >= 0) {
-            const PropertyChainValue& v = vals[effective];
-            bool isLocal = v.PropertyChainIndex < srcCount && srcs &&
-                           srcs[v.PropertyChainIndex].Source == BaseValueSourceLocal;
-            if (isLocal && (v.MetadataBits & IsValueHandle))
-                *original = ParseDecimal(v.Value);
+    if (c->vals) {
+        for (unsigned int i = 0; i < c->propCount; i++) {
+            SysFreeString(c->vals[i].Type);
+            SysFreeString(c->vals[i].DeclaringType);
+            SysFreeString(c->vals[i].ValueType);
+            SysFreeString(c->vals[i].ItemType);
+            SysFreeString(c->vals[i].Value);
+            SysFreeString(c->vals[i].PropertyName);
         }
-        ok = true;
+        CoTaskMemFree(c->vals);
     }
-
-    // Free everything the service allocated for us (caller owns [out] data).
-    if (srcs) {
-        for (unsigned int i = 0; i < srcCount; i++) {
-            SysFreeString(srcs[i].TargetType);
-            SysFreeString(srcs[i].Name);
-            SysFreeString(srcs[i].SrcInfo.FileName);
-            SysFreeString(srcs[i].SrcInfo.Hash);
-        }
-        CoTaskMemFree(srcs);
-    }
-    if (vals) {
-        for (unsigned int i = 0; i < propCount; i++) {
-            SysFreeString(vals[i].Type);
-            SysFreeString(vals[i].DeclaringType);
-            SysFreeString(vals[i].ValueType);
-            SysFreeString(vals[i].ItemType);
-            SysFreeString(vals[i].Value);
-            SysFreeString(vals[i].PropertyName);
-        }
-        CoTaskMemFree(vals);
-    }
-    return ok;
+    ZeroMemory(c, sizeof(Chain));
 }
 
-static void EvictBrush(DWORD tid, UINT64 brush)
+static bool ChainGet(IVisualTreeService* svc, UINT64 element, Chain* c)
 {
-    Locker l;
-    ThreadState* ts = FindThread(tid);
-    if (!ts) return;
-    for (UINT32 i = 0; i < ts->nBrushes; i++)
-        if (ts->brushes[i].handle == brush) ts->brushes[i].handle = 0;
+    ZeroMemory(c, sizeof(Chain));
+    HRESULT hr = svc->GetPropertyValuesChain(element, &c->srcCount, &c->srcs, &c->propCount, &c->vals);
+    if (FAILED(hr)) {
+        // [out] data is undefined on failure: never free it (a tiny leak beats a double free).
+        ZeroMemory(c, sizeof(Chain));
+        return false;
+    }
+    if (!c->srcs) c->srcCount = 0;
+    if (!c->vals) c->propCount = 0;
+    return true;
 }
 
-// Returns a SolidColorBrush handle for this color on the current UI thread (cached).
-static UINT64 GetBrush(IVisualTreeService* svc, DWORD tid, UINT32 argb, BYTE winui)
+// first = first entry with that property name (its Index is the property index),
+// eff = first non-overridden entry (the effective value).
+static void ChainFind(const Chain* c, const WCHAR* name, int* first, int* eff)
 {
-    {
+    *first = -1;
+    *eff = -1;
+    if (!c || !c->vals) return;
+    for (unsigned int i = 0; i < c->propCount; i++) {
+        if (!StrEq(c->vals[i].PropertyName, name)) continue;
+        if (*first < 0) *first = (int)i;
+        if (!c->vals[i].Overridden && *eff < 0) *eff = (int)i;
+    }
+}
+
+static const WCHAR* ChainValue(const Chain* c, const WCHAR* name)
+{
+    int first, eff;
+    ChainFind(c, name, &first, &eff);
+    int i = eff >= 0 ? eff : first;
+    if (i < 0) return NULL;
+    return c->vals[i].Value;
+}
+
+static bool EndsWith(const WCHAR* s, const WCHAR* suffix, SIZE_T* prefixLen)
+{
+    if (!s) return false;
+    SIZE_T a = wcslen(s), b = wcslen(suffix);
+    if (a < b || wcscmp(s + (a - b), suffix) != 0) return false;
+    *prefixLen = a - b;
+    return true;
+}
+
+// "X.Media.Brush" (abstract) -> "X.Media.SolidColorBrush".
+static bool MapBrushType(const WCHAR* type, WCHAR* out, SIZE_T outCount)
+{
+    SIZE_T pre = 0;
+    if (!EndsWith(type, L".Media.Brush", &pre)) return false;
+    static const WCHAR kSuffix[] = L".Media.SolidColorBrush";
+    SIZE_T sl = ARRAYSIZE(kSuffix) - 1;
+    if (pre + sl + 1 > outCount) return false;
+    CopyMemory(out, type, pre * sizeof(WCHAR));
+    CopyMemory(out + pre, kSuffix, (sl + 1) * sizeof(WCHAR));
+    return true;
+}
+
+struct Ctx {
+    IVisualTreeService* svc;
+    IXamlDiagnostics*   diag;
+    DWORD               tid;
+    UINT32              gen;
+    UINT32              pass;
+};
+
+// Returns a handle for (type, value) on the current UI thread, cached per thread.
+static UINT64 GetPlainValue(const Ctx& cx, const WCHAR* type, const WCHAR* value, UINT32 valueLen,
+                            bool forceNew, bool* fromCache)
+{
+    *fromCache = false;
+    UINT64 key = HashChars(kFnvOffset, type, wcslen(type));
+    key ^= 0x1F;
+    key *= kFnvPrime;
+    key = HashChars(key, value, valueLen);
+    if (key == 0) key = 1;
+
+    if (!forceNew) {
         Locker l;
-        ThreadState* ts = FindThread(tid);
+        ThreadState* ts = FindThread(cx.tid);
         if (ts) {
-            for (UINT32 i = 0; i < ts->nBrushes; i++) {
-                const BrushEntry& b = ts->brushes[i];
-                if (b.handle && b.argb == argb && b.winui == winui) return b.handle;
+            for (int i = 0; i < VALUE_CACHE; i++) {
+                if (ts->cache[i].hash == key && ts->cache[i].handle) {
+                    *fromCache = true;
+                    return ts->cache[i].handle;
+                }
             }
         }
     }
 
-    WCHAR text[10];
-    FormatArgb(argb, text);
-    BSTR type = SysAllocString(winui ? L"Microsoft.UI.Xaml.Media.SolidColorBrush"
-                                     : L"Windows.UI.Xaml.Media.SolidColorBrush");
-    BSTR value = SysAllocString(text);
+    BSTR bt = SysAllocString(type);
+    BSTR bv = SysAllocStringLen(value, valueLen);
     UINT64 handle = 0;
-    if (type && value) {
-        if (FAILED(svc->CreateInstance(type, value, &handle))) handle = 0;
+    if (bt && bv) {
+        if (FAILED(cx.svc->CreateInstance(bt, bv, &handle))) handle = 0;
     }
-    SysFreeString(type);
-    SysFreeString(value);
+    SysFreeString(bt);
+    SysFreeString(bv);
     if (!handle) return 0;
 
     Locker l;
-    ThreadState* ts = FindThread(tid);
+    ThreadState* ts = FindThread(cx.tid);
     if (ts) {
-        UINT32 slot;
-        if (ts->nBrushes < MAX_BRUSHES) slot = ts->nBrushes++;
-        else slot = (ts->nextEvict++) % MAX_BRUSHES;
-        ts->brushes[slot].handle = handle;
-        ts->brushes[slot].argb = argb;
-        ts->brushes[slot].winui = winui;
+        int slot = -1;
+        for (int i = 0; i < VALUE_CACHE && slot < 0; i++)
+            if (ts->cache[i].hash == key) slot = i;
+        for (int i = 0; i < VALUE_CACHE && slot < 0; i++)
+            if (ts->cache[i].hash == 0) slot = i;
+        if (slot < 0) slot = (int)(ts->nextEvict++ % VALUE_CACHE);
+        ts->cache[slot].hash = key;
+        ts->cache[slot].handle = handle;
     }
     return handle;
 }
 
-static void UpdateTarget(UINT64 handle, const Target& src)
+static HRESULT SetPlain(const Ctx& cx, UINT64 e, UINT32 idx, const Rule& r, const Chain* c,
+                        int first, int eff, UINT64* outHandle)
 {
-    Locker l;
-    Target* t = FindTarget(handle);
-    if (!t) return;
-    t->resolved = src.resolved;
-    t->fillIndex = src.fillIndex;
-    t->original = src.original;
-    t->overridden = src.overridden;
+    *outHandle = 0;
+    if (!c || first < 0) return E_FAIL;
+
+    const WCHAR* cands[3];
+    int n = 0;
+    WCHAR mapped[300];
+    const WCHAR* t = c->vals[first].Type;
+    if (MapBrushType(t, mapped, ARRAYSIZE(mapped))) cands[n++] = mapped;
+    else if (t && *t) cands[n++] = t;
+    const WCHAR* vt = c->vals[eff >= 0 ? eff : first].ValueType;
+    if (vt && *vt && !(n > 0 && StrEq(cands[0], vt))) cands[n++] = vt;
+    static const WCHAR kSolid[] = L"Windows.UI.Xaml.Media.SolidColorBrush";
+    if (r.value[0] == L'#') {
+        bool dup = false;
+        for (int i = 0; i < n; i++) if (StrEq(cands[i], kSolid)) dup = true;
+        if (!dup) cands[n++] = kSolid;
+    }
+
+    HRESULT hr = E_FAIL;
+    for (int i = 0; i < n; i++) {
+        bool cached = false;
+        UINT64 h = GetPlainValue(cx, cands[i], r.value, r.valueLen, false, &cached);
+        if (!h) continue;
+        hr = cx.svc->SetProperty(e, h, idx);
+        if (FAILED(hr) && cached) {
+            // Cached value may have gone stale: retry once with a fresh one.
+            h = GetPlainValue(cx, cands[i], r.value, r.valueLen, true, &cached);
+            if (!h) continue;
+            hr = cx.svc->SetProperty(e, h, idx);
+        }
+        if (SUCCEEDED(hr)) {
+            *outHandle = h;
+            return hr;
+        }
+    }
+    return FAILED(hr) ? hr : E_FAIL;
 }
 
-static bool RestoreOne(IVisualTreeService* svc, const Target& t)
+// Copies `text` adding the default XAML namespaces to the root element if missing.
+static WCHAR* BuildXaml(const WCHAR* text, UINT32 len, UINT32* outLen)
 {
-    if (!t.resolved) return false;
-    if (t.original && SUCCEEDED(svc->SetProperty(t.handle, t.original, t.fillIndex))) return true;
-    return SUCCEEDED(svc->ClearProperty(t.handle, t.fillIndex));
+    static const WCHAR kNs[]  = L" xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\"";
+    static const WCHAR kNsX[] = L" xmlns:x=\"http://schemas.microsoft.com/winfx/2006/xaml\"";
+    const SIZE_T nsLen = ARRAYSIZE(kNs) - 1, nsxLen = ARRAYSIZE(kNsX) - 1;
+
+    bool addNs = false, addNsX = false;
+    UINT32 nameEnd = 0;
+    if (len > 1 && text[0] == L'<' && text[1] != L'?' && text[1] != L'!') {
+        UINT32 tagEnd = 0;
+        while (tagEnd < len && text[tagEnd] != L'>') tagEnd++;
+        if (tagEnd < len) {
+            nameEnd = 1;
+            while (nameEnd < tagEnd && !IsSpace(text[nameEnd]) && text[nameEnd] != L'/') nameEnd++;
+            addNs = addNsX = true;
+            for (UINT32 i = nameEnd; i < tagEnd; i++) {
+                if (i + 6 <= tagEnd && wcsncmp(text + i, L"xmlns=", 6) == 0) addNs = false;
+                if (i + 8 <= tagEnd && wcsncmp(text + i, L"xmlns:x=", 8) == 0) addNsX = false;
+            }
+        }
+    }
+    SIZE_T total = len + (addNs ? nsLen : 0) + (addNsX ? nsxLen : 0);
+    WCHAR* buf = (WCHAR*)HeapAlloc(GetProcessHeap(), 0, (total + 1) * sizeof(WCHAR));
+    if (!buf) return NULL;
+    SIZE_T o = 0;
+    if (addNs || addNsX) {
+        CopyMemory(buf, text, nameEnd * sizeof(WCHAR)); o = nameEnd;
+        if (addNs)  { CopyMemory(buf + o, kNs, nsLen * sizeof(WCHAR));   o += nsLen; }
+        if (addNsX) { CopyMemory(buf + o, kNsX, nsxLen * sizeof(WCHAR)); o += nsxLen; }
+        CopyMemory(buf + o, text + nameEnd, (len - nameEnd) * sizeof(WCHAR)); o += len - nameEnd;
+    } else {
+        CopyMemory(buf, text, len * sizeof(WCHAR)); o = len;
+    }
+    buf[o] = 0;
+    *outLen = (UINT32)o;
+    return buf;
 }
 
-// Applies g_state to every target owned by the calling UI thread. Returns #elements changed.
-static UINT ApplyCurrentState()
+// XamlReader.Load(text) -> object + diagnostics handle. On success the caller owns one
+// reference to *objOut and keeps it while the value is applied (we do not rely on the
+// diagnostics handle table to keep the object alive).
+static HRESULT LoadXamlValue(IXamlDiagnostics* diag, const WCHAR* text, UINT32 len,
+                             IInspectableAbi** objOut, UINT64* handleOut)
 {
-    const DWORD tid = GetCurrentThreadId();
+    *objOut = NULL;
+    *handleOut = 0;
+    if (!diag) return E_NOINTERFACE;
+    WinRtFns fns;
+    if (!ResolveWinRt(&fns)) return E_NOTIMPL;
+
+    UINT32 xlen = 0;
+    WCHAR* xaml = BuildXaml(text, len, &xlen);
+    if (!xaml) return E_OUTOFMEMORY;
+
+    static const WCHAR kClass[] = L"Windows.UI.Xaml.Markup.XamlReader";
+    HSTR hsClass = NULL, hsXaml = NULL;
+    IXamlReaderStatics* reader = NULL;
+    IInspectableAbi* obj = NULL;
+    HRESULT hr = fns.create(kClass, (UINT32)(ARRAYSIZE(kClass) - 1), &hsClass);
+    if (SUCCEEDED(hr)) hr = fns.create(xaml, xlen, &hsXaml);
+    if (SUCCEEDED(hr)) hr = fns.getFactory(hsClass, winrtabi::IID_IXamlReaderStatics, (void**)&reader);
+    if (SUCCEEDED(hr) && !reader) hr = E_NOINTERFACE;
+    if (SUCCEEDED(hr)) hr = reader->Load(hsXaml, &obj);
+    if (reader) reader->Release();
+    if (hsXaml) fns.del(hsXaml);
+    if (hsClass) fns.del(hsClass);
+    HeapFree(GetProcessHeap(), 0, xaml);
+    if (FAILED(hr)) {
+        if (obj) obj->Release();
+        return hr;
+    }
+    if (!obj) return E_FAIL;
+
+    UINT64 h = 0;
+    hr = diag->GetHandleFromIInspectable(obj, &h);
+    if (FAILED(hr) || !h) {
+        h = 0;
+        hr = diag->RegisterInstance(obj, &h);
+    }
+    if (FAILED(hr) || !h) {
+        obj->Release();
+        return FAILED(hr) ? hr : E_FAIL;
+    }
+    *objOut = obj;
+    *handleOut = h;
+    return S_OK;
+}
+
+// Applies one rule to one (element, property). Returns true if it is now applied & tracked.
+static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, const Chain* c)
+{
+    const WCHAR* propName = PoolStr(propId);
+    int first = -1, eff = -1;
+    if (c) ChainFind(c, propName, &first, &eff);
+
+    bool hasRec = false;
+    UINT32 idx = 0;
+    BYTE recKind = 0;
+    UINT64 recHash = 0, recHandle = 0;
+    {
+        Locker l;
+        Record* rec = FindRecordLocked(e, propId);
+        if (rec) {
+            hasRec = true;
+            idx = rec->propIndex;
+            recKind = rec->valueKind;
+            recHash = rec->valueHash;
+            recHandle = rec->valueHandle;
+        }
+    }
+
+    if (!hasRec) {
+        if (first < 0) return false;   // element has no such property (or chain unavailable)
+        idx = c->vals[first].Index;
+
+        // Capture the exact original local value (if any) before we change anything.
+        BYTE origKind = kOrigNone;
+        UINT64 origHandle = 0;
+        BSTR origType = NULL, origValue = NULL;
+        if (eff >= 0) {
+            const PropertyChainValue& v = c->vals[eff];
+            bool isLocal = c->srcs && v.PropertyChainIndex < c->srcCount &&
+                           c->srcs[v.PropertyChainIndex].Source == BaseValueSourceLocal;
+            if (isLocal) {
+                if (v.MetadataBits & IsValueHandle) {
+                    origHandle = ParseDecimal(v.Value);
+                    if (origHandle) origKind = kOrigHandle;
+                } else if (v.Value) {
+                    const WCHAR* t = (v.ValueType && *v.ValueType) ? v.ValueType : v.Type;
+                    if (t && *t) {
+                        origType = SysAllocString(t);
+                        origValue = SysAllocStringLen(v.Value, SysStringLen(v.Value));
+                        if (origType && origValue) origKind = kOrigString;
+                        else {
+                            SysFreeString(origType); origType = NULL;
+                            SysFreeString(origValue); origValue = NULL;
+                        }
+                    }
+                }
+            }
+        }
+
+        bool reserved = false;
+        {
+            Locker l;
+            Record* rec = FindRecordLocked(e, propId);   // cannot exist, but be safe
+            if (!rec) {
+                rec = AllocRecordLocked();
+                if (rec) {
+                    rec->element = e;
+                    rec->tid = cx.tid;
+                    rec->propId = propId;
+                    rec->propIndex = idx;
+                    rec->origKind = origKind;
+                    rec->origHandle = origHandle;
+                    rec->origType = origType;
+                    rec->origValue = origValue;
+                    rec->gen = 0;
+                    reserved = true;
+                }
+            }
+        }
+        if (!reserved) {
+            SysFreeString(origType);
+            SysFreeString(origValue);
+            return false;
+        }
+    }
+
+    HRESULT hr = E_FAIL;
+    UINT64 valHandle = 0;
+    IInspectableAbi* newObj = NULL;
+    if (r.kind == kValClear) {
+        hr = cx.svc->ClearProperty(e, idx);
+    } else if (r.kind == kValXaml) {
+        if (hasRec && recKind == kValXaml && recHash == r.valueHash && recHandle) {
+            valHandle = recHandle;               // same XAML as before: reuse our object
+            hr = cx.svc->SetProperty(e, valHandle, idx);
+        }
+        if (FAILED(hr)) {
+            valHandle = 0;
+            hr = LoadXamlValue(cx.diag, r.value, r.valueLen, &newObj, &valHandle);
+            if (SUCCEEDED(hr)) hr = cx.svc->SetProperty(e, valHandle, idx);
+        }
+    } else {
+        hr = SetPlain(cx, e, idx, r, c, first, eff, &valHandle);
+    }
+
+    if (FAILED(hr)) {
+        if (newObj) newObj->Release();
+        if (!hasRec) {
+            // Drop our reservation: the property was not changed.
+            Record taken;
+            ZeroMemory(&taken, sizeof(taken));
+            bool got = false;
+            {
+                Locker l;
+                Record* rec = FindRecordLocked(e, propId);
+                if (rec && rec->gen == 0) { taken = *rec; ZeroMemory(rec, sizeof(Record)); got = true; }
+            }
+            if (got) FreeRecordResources(taken, true);
+        }
+        return false;
+    }
+
+    IInspectableAbi* oldObj = NULL;
+    bool tracked = false;
+    {
+        Locker l;
+        Record* rec = FindRecordLocked(e, propId);
+        if (rec) {
+            rec->gen = cx.gen;
+            rec->pass = cx.pass;
+            rec->valueHash = r.valueHash;
+            rec->valueKind = r.kind;
+            rec->valueHandle = valHandle;
+            if (newObj) {
+                oldObj = rec->xamlObj;
+                rec->xamlObj = newObj;
+                newObj = NULL;
+            } else if (r.kind != kValXaml) {
+                oldObj = rec->xamlObj;
+                rec->xamlObj = NULL;
+            }
+            tracked = true;
+        }
+    }
+    if (oldObj) oldObj->Release();   // no longer set on the element
+    if (newObj) newObj->Release();   // record vanished meanwhile: the element holds its own ref
+    return tracked;
+}
+
+static bool RestoreRecord(IVisualTreeService* svc, const Record& r)
+{
+    if (r.origKind == kOrigHandle && r.origHandle &&
+        SUCCEEDED(svc->SetProperty(r.element, r.origHandle, r.propIndex)))
+        return true;
+    if (r.origKind == kOrigString && r.origType && r.origValue) {
+        UINT64 h = 0;
+        if (SUCCEEDED(svc->CreateInstance(r.origType, r.origValue, &h)) && h &&
+            SUCCEEDED(svc->SetProperty(r.element, h, r.propIndex)))
+            return true;
+    }
+    return SUCCEEDED(svc->ClearProperty(r.element, r.propIndex));
+}
+
+// Restores every record of this thread that the current pass did not (re)apply.
+static UINT RestoreStale(const Ctx& cx)
+{
+    UINT restored = 0;
+    for (;;) {
+        Record taken;
+        ZeroMemory(&taken, sizeof(taken));
+        bool got = false;
+        {
+            Locker l;
+            for (UINT32 i = 0; i < g_recHigh; i++) {
+                Record& r = g_recs[i];
+                if (r.element && r.tid == cx.tid && r.pass != cx.pass) {
+                    taken = r;
+                    ZeroMemory(&r, sizeof(Record));
+                    got = true;
+                    break;
+                }
+            }
+        }
+        if (!got) break;
+        if (RestoreRecord(cx.svc, taken)) restored++;
+        FreeRecordResources(taken, true);
+    }
+    return restored;
+}
+
+struct Match {
+    UINT64 element;
+    UINT16 propId;
+    UINT16 rule;    // index into the rule set, or kMatchDone
+    UINT32 pad;
+};
+#define MAX_MATCHES MAX_RECORDS
+
+// Applies the current rule set to every element owned by the calling UI thread and
+// restores whatever is no longer targeted. Returns #(element, property) pairs applied.
+static UINT ApplyRulesOnThisThread(UINT* restoredOut)
+{
+    if (restoredOut) *restoredOut = 0;
+    Ctx cx;
+    ZeroMemory(&cx, sizeof(cx));
+    cx.tid = GetCurrentThreadId();
+    RuleSet* rs = NULL;
+    {
+        Locker l;
+        cx.svc = g_service;
+        cx.diag = g_diag;
+        rs = g_rules;
+        if (rs) rs->refs++;
+        cx.gen = rs ? rs->gen : 0;
+        if (++g_pass == 0) ++g_pass;
+        cx.pass = g_pass;
+        ThreadState* ts = FindThread(cx.tid);
+        if (ts) ts->pendingPosted = FALSE;
+    }
+    if (!cx.svc) { ReleaseRules(rs); return 0; }
+
+    Match* m = NULL;
+    UINT32 nm = 0;
+    if (rs && rs->count) {
+        m = (Match*)HeapAlloc(GetProcessHeap(), 0, MAX_MATCHES * sizeof(Match));
+        if (!m) { ReleaseRules(rs); return 0; }   // keep everything as is
+        Locker l;
+        for (SIZE_T i = 0; i < g_mapCap; i++) {
+            const MapSlot* s = &g_map[i];
+            if (s->used != 1 || s->tid != cx.tid) continue;
+            int inTree = -1;
+            const UINT32 groupStart = nm;
+            for (UINT32 ri = 0; ri < rs->count; ri++) {
+                const Rule& r = rs->rules[ri];
+                if (!MatchRuleLocked(s, r)) continue;
+                if (inTree < 0) inTree = InTaskbarTreeLocked(s) ? 1 : 0;
+                if (!inTree) break;
+                UINT32 j = groupStart;
+                while (j < nm && m[j].propId != r.propId) j++;
+                if (j < nm) m[j].rule = (UINT16)ri;          // later rules win
+                else if (nm < MAX_MATCHES) {
+                    m[nm].element = s->key;
+                    m[nm].propId = r.propId;
+                    m[nm].rule = (UINT16)ri;
+                    m[nm].pad = 0;
+                    nm++;
+                }
+            }
+        }
+    }
+
+    UINT32 i = 0;
+    while (i < nm) {
+        const UINT64 e = m[i].element;
+        UINT32 j = i;
+        while (j < nm && m[j].element == e) j++;
+
+        bool need = false;
+        {
+            Locker l;
+            for (UINT32 k = i; k < j; k++) {
+                const Rule& r = rs->rules[m[k].rule];
+                Record* rec = FindRecordLocked(e, m[k].propId);
+                if (rec && rec->gen == cx.gen && rec->gen != 0 && rec->valueHash == r.valueHash) {
+                    rec->pass = cx.pass;          // already applied from this rule set
+                    m[k].rule = kMatchDone;
+                } else {
+                    need = true;
+                }
+            }
+        }
+        if (need) {
+            Chain c;
+            bool haveChain = ChainGet(cx.svc, e, &c);
+            for (UINT32 k = i; k < j; k++) {
+                if (m[k].rule == kMatchDone) continue;
+                ApplyOne(cx, e, m[k].propId, rs->rules[m[k].rule], haveChain ? &c : NULL);
+            }
+            if (haveChain) ChainFree(&c);
+        }
+        i = j;
+    }
+    if (m) HeapFree(GetProcessHeap(), 0, m);
+
+    UINT restored = RestoreStale(cx);
+    if (restoredOut) *restoredOut = restored;
+
+    UINT count = 0;
+    {
+        Locker l;
+        for (UINT32 k = 0; k < g_recHigh; k++)
+            if (g_recs[k].element && g_recs[k].tid == cx.tid && g_recs[k].pass == cx.pass && g_recs[k].gen != 0)
+                count++;
+    }
+    ReleaseRules(rs);
+    return count;
+}
+
+// Replaces the global rule set (rs may be NULL = no rules) and asks every other sink to
+// re-apply on its own thread.
+static void InstallRules(RuleSet* rs)
+{
+    RuleSet* old = NULL;
+    HWND others[MAX_THREADS];
+    DWORD otherTids[MAX_THREADS];
+    int no = 0;
+    const DWORD me = GetCurrentThreadId();
+    {
+        Locker l;
+        old = g_rules;
+        if (rs) {
+            rs->refs = 1;   // the global reference
+            if (++g_gen == 0) ++g_gen;
+            rs->gen = g_gen;
+        }
+        g_rules = rs;
+        for (int i = 0; i < MAX_THREADS; i++) {
+            ThreadState& ts = g_threads[i];
+            if (ts.tid && ts.tid != me && ts.sink && !ts.pendingPosted) {
+                ts.pendingPosted = TRUE;
+                others[no] = ts.sink;
+                otherTids[no] = ts.tid;
+                no++;
+            }
+        }
+    }
+    ReleaseRules(old);
+    for (int i = 0; i < no; i++) {
+        if (!PostMessageW(others[i], WM_OPAC_PENDING, 0, 0)) {
+            Locker l;
+            ThreadState* ts = FindThread(otherTids[i]);
+            if (ts) ts->pendingPosted = FALSE;
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------
+//  DUMP
+// -------------------------------------------------------------------------------------
+struct WBuf {
+    WCHAR* p;
+    SIZE_T len;
+    SIZE_T cap;
+    bool   bad;
+};
+
+static bool BufReserve(WBuf* b, SIZE_T extra)
+{
+    if (b->bad) return false;
+    SIZE_T need = b->len + extra + 1;
+    if (need > OPAC_MAX_DUMP_CHARS) { b->bad = true; return false; }
+    if (need <= b->cap) return true;
+    SIZE_T nc = b->cap ? b->cap * 2 : 65536;
+    while (nc < need) nc *= 2;
+    if (nc > OPAC_MAX_DUMP_CHARS) nc = OPAC_MAX_DUMP_CHARS;
+    HANDLE heap = GetProcessHeap();
+    WCHAR* np = b->p ? (WCHAR*)HeapReAlloc(heap, 0, b->p, nc * sizeof(WCHAR))
+                     : (WCHAR*)HeapAlloc(heap, 0, nc * sizeof(WCHAR));
+    if (!np) { b->bad = true; return false; }
+    b->p = np;
+    b->cap = nc;
+    return true;
+}
+
+static void BufRaw(WBuf* b, const WCHAR* s)
+{
+    SIZE_T n = wcslen(s);
+    if (!BufReserve(b, n)) return;
+    CopyMemory(b->p + b->len, s, n * sizeof(WCHAR));
+    b->len += n;
+}
+
+// Appends with tabs / line breaks replaced by spaces (keeps the line format intact).
+static void BufText(WBuf* b, const WCHAR* s)
+{
+    if (!s) return;
+    SIZE_T n = wcslen(s);
+    if (n > 4096) n = 4096;
+    if (!BufReserve(b, n)) return;
+    for (SIZE_T i = 0; i < n; i++) {
+        WCHAR ch = s[i];
+        b->p[b->len++] = (ch == L'\t' || ch == L'\r' || ch == L'\n') ? L' ' : ch;
+    }
+}
+
+static void BufUInt(WBuf* b, UINT64 v)
+{
+    WCHAR tmp[24];
+    int n = 0;
+    do { tmp[n++] = (WCHAR)(L'0' + (v % 10)); v /= 10; } while (v && n < 23);
+    if (!BufReserve(b, (SIZE_T)n)) return;
+    while (n > 0) b->p[b->len++] = tmp[--n];
+}
+
+static const WCHAR* ShortTypeName(const WCHAR* t)
+{
+    if (!t) return L"";
+    const WCHAR* dot = wcsrchr(t, L'.');
+    return dot ? dot + 1 : t;
+}
+
+// "Background or Fill": brush type, plus its Color for solid brushes.
+static void BufBrush(WBuf* b, IVisualTreeService* svc, const Chain* c)
+{
+    int first, eff;
+    ChainFind(c, L"Background", &first, &eff);
+    if (first < 0) ChainFind(c, L"Fill", &first, &eff);
+    int i = eff >= 0 ? eff : first;
+    if (i < 0) return;
+    const PropertyChainValue& v = c->vals[i];
+    if (v.MetadataBits & IsValueHandle) {
+        UINT64 h = ParseDecimal(v.Value);
+        BufText(b, ShortTypeName(v.ValueType));
+        if (h) {
+            Chain bc;
+            if (ChainGet(svc, h, &bc)) {
+                const WCHAR* color = ChainValue(&bc, L"Color");
+                if (color && *color) { BufRaw(b, L" "); BufText(b, color); }
+                ChainFree(&bc);
+            }
+        }
+    } else {
+        BufText(b, v.Value);
+    }
+}
+
+struct DumpNode {
+    UINT64 key;
+    UINT64 parent;
+    UINT32 childIndex;
+    UINT16 typeId;
+    UINT16 nameId;
+    BYTE   root;
+    BYTE   visited;
+    BYTE   pad[6];
+};
+
+static int __cdecl CmpDumpNode(const void* pa, const void* pb)
+{
+    const DumpNode* a = (const DumpNode*)pa;
+    const DumpNode* b = (const DumpNode*)pb;
+    if (a->parent != b->parent) return a->parent < b->parent ? -1 : 1;
+    if (a->childIndex != b->childIndex) return a->childIndex < b->childIndex ? -1 : 1;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return 0;
+}
+
+static SIZE_T LowerBoundParent(const DumpNode* nodes, SIZE_T n, UINT64 parent)
+{
+    SIZE_T lo = 0, hi = n;
+    while (lo < hi) {
+        SIZE_T mid = lo + (hi - lo) / 2;
+        if (nodes[mid].parent < parent) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+struct DumpFrame {
+    SIZE_T node;
+    UINT32 depth;
+};
+
+static LRESULT DumpTree(HWND target, HWND self)
+{
+    if (!target || !IsWindow(target)) return 0;
     IVisualTreeService* svc = NULL;
-    OpacState st;
-    Target snap[MAX_TARGETS];
-    UINT n = 0;
+    const DWORD tid = GetCurrentThreadId();
+    HANDLE heap = GetProcessHeap();
+    DumpNode* nodes = NULL;
+    SIZE_T n = 0;
     {
         Locker l;
         svc = g_service;
-        st = g_state;
-        for (int i = 0; i < MAX_TARGETS; i++)
-            if (g_targets[i].handle && g_targets[i].tid == tid) snap[n++] = g_targets[i];
-    }
-    if (!svc) return 0;
-
-    UINT count = 0;
-    for (UINT i = 0; i < n; i++) {
-        Target t = snap[i];
-
-        bool paint = false;
-        UINT32 color = 0;
-        if (st.overrideOn) {
-            if (t.kind == KIND_FILL)  { paint = true; color = st.argb; }
-            else if (st.hideStroke)   { paint = true; color = 0x00000000; }
-        }
-
-        if (paint) {
-            if (!t.resolved) {
-                UINT32 idx = 0; UINT64 orig = 0;
-                if (!ResolveFill(svc, t.handle, &idx, &orig)) continue;
-                t.resolved = 1; t.fillIndex = idx; t.original = orig;
-                UpdateTarget(t.handle, t);
-            }
-            UINT64 brush = GetBrush(svc, tid, color, t.winui);
-            if (!brush) continue;
-            HRESULT hr = svc->SetProperty(t.handle, brush, t.fillIndex);
-            if (FAILED(hr)) {
-                // Cached brush may have gone stale: retry once with a fresh one.
-                EvictBrush(tid, brush);
-                brush = GetBrush(svc, tid, color, t.winui);
-                if (!brush) continue;
-                hr = svc->SetProperty(t.handle, brush, t.fillIndex);
-            }
-            if (SUCCEEDED(hr)) {
-                t.overridden = 1;
-                UpdateTarget(t.handle, t);
-                count++;
-            }
-        } else if (t.overridden) {
-            if (RestoreOne(svc, t)) {
-                t.overridden = 0;
-                UpdateTarget(t.handle, t);
-                count++;
+        SIZE_T count = 0;
+        for (SIZE_T i = 0; i < g_mapCap; i++)
+            if (g_map[i].used == 1 && g_map[i].tid == tid) count++;
+        if (count) nodes = (DumpNode*)HeapAlloc(heap, HEAP_ZERO_MEMORY, count * sizeof(DumpNode));
+        if (nodes) {
+            for (SIZE_T i = 0; i < g_mapCap && n < count; i++) {
+                const MapSlot* s = &g_map[i];
+                if (s->used != 1 || s->tid != tid) continue;
+                DumpNode& d = nodes[n++];
+                d.key = s->key;
+                d.parent = s->parent;
+                d.childIndex = s->childIndex;
+                d.typeId = s->typeId;
+                d.nameId = s->nameId;
+                d.root = ((s->flags & SLOT_ROOT) && !HasMarkedAncestorLocked(s)) ? 1 : 0;
             }
         }
     }
-    return count;
+    if (!svc) { if (nodes) HeapFree(heap, 0, nodes); return 0; }
+
+    WBuf b;
+    ZeroMemory(&b, sizeof(b));
+    BufRaw(&b, L"opacbar-tree 2\n");
+
+    if (n) {
+        qsort(nodes, n, sizeof(DumpNode), CmpDumpNode);
+        DumpFrame* stack = (DumpFrame*)HeapAlloc(heap, 0, (2 * n + 1) * sizeof(DumpFrame));
+        const SIZE_T stackCap = 2 * n + 1;
+        UINT lines = 0;
+        bool stop = (stack == NULL);
+        for (SIZE_T r = 0; r < n && !stop; r++) {
+            if (!nodes[r].root || nodes[r].visited) continue;
+            SIZE_T sp = 0;
+            stack[sp].node = r; stack[sp].depth = 0; sp++;
+            while (sp > 0 && !stop) {
+                DumpFrame f = stack[--sp];
+                DumpNode& d = nodes[f.node];
+                if (d.visited) continue;
+                d.visited = 1;
+
+                const SIZE_T mark = b.len;
+                BufUInt(&b, f.depth);                       BufRaw(&b, L"\t");
+                BufText(&b, PoolStr(d.typeId));             BufRaw(&b, L"\t");
+                BufText(&b, PoolStr(d.nameId));             BufRaw(&b, L"\t");
+                BufUInt(&b, d.childIndex);                  BufRaw(&b, L"\t");
+                Chain c;
+                if (ChainGet(svc, d.key, &c)) {
+                    const WCHAR* w = ChainValue(&c, L"ActualWidth");
+                    const WCHAR* h = ChainValue(&c, L"ActualHeight");
+                    if ((w && *w) || (h && *h)) { BufText(&b, w); BufRaw(&b, L"x"); BufText(&b, h); }
+                    BufRaw(&b, L"\t"); BufText(&b, ChainValue(&c, L"Margin"));
+                    BufRaw(&b, L"\t"); BufText(&b, ChainValue(&c, L"Padding"));
+                    BufRaw(&b, L"\t"); BufText(&b, ChainValue(&c, L"CornerRadius"));
+                    BufRaw(&b, L"\t"); BufBrush(&b, svc, &c);
+                    ChainFree(&c);
+                } else {
+                    BufRaw(&b, L"\t\t\t\t");
+                }
+                BufRaw(&b, L"\n");
+                if (b.bad) {          // out of space: drop the partial line and stop
+                    b.len = mark;
+                    stop = true;
+                    break;
+                }
+                if (++lines >= OPAC_MAX_DUMP_LINES) { stop = true; break; }
+
+                // Push children in reverse so they come out in child-index order.
+                SIZE_T lo = LowerBoundParent(nodes, n, d.key);
+                SIZE_T hi = lo;
+                while (hi < n && nodes[hi].parent == d.key) hi++;
+                for (SIZE_T k = hi; k > lo; k--) {
+                    if (sp >= stackCap) break;
+                    if (nodes[k - 1].visited) continue;
+                    stack[sp].node = k - 1;
+                    stack[sp].depth = f.depth + 1;
+                    sp++;
+                }
+            }
+        }
+        if (stack) HeapFree(heap, 0, stack);
+    }
+    if (nodes) HeapFree(heap, 0, nodes);
+
+    LRESULT result = 0;
+    if (b.p && b.len > 0) {
+        COPYDATASTRUCT cds;
+        cds.dwData = OPAC_COPYDATA_TREE;
+        cds.cbData = (DWORD)(b.len * sizeof(WCHAR));
+        cds.lpData = b.p;
+        DWORD_PTR res = 0;
+        if (SendMessageTimeoutW(target, WM_COPYDATA, (WPARAM)self, (LPARAM)&cds,
+                                SMTO_ABORTIFHUNG, 10000, &res))
+            result = 1;
+    }
+    if (b.p) HeapFree(heap, 0, b.p);
+    return result;
 }
 
 // -------------------------------------------------------------------------------------
@@ -684,41 +1881,69 @@ static void ForgetThread(DWORD tid, HWND hwnd)
     Locker l;
     ThreadState* ts = FindThread(tid);
     if (!ts || ts->sink != hwnd) return;
-    for (int i = 0; i < MAX_TARGETS; i++)
-        if (g_targets[i].tid == tid) ZeroMemory(&g_targets[i], sizeof(Target));
+    DropThreadRecordsLocked(tid);
     ZeroMemory(ts, sizeof(ThreadState));
+}
+
+static void AppendW(WCHAR* buf, SIZE_T cap, const WCHAR* s)
+{
+    wcscat_s(buf, cap, s);
+}
+
+static LRESULT HandleRulesDoc(const WCHAR* data, SIZE_T nChars)
+{
+    bool headerOk = false;
+    RuleSet* rs = ParseRules(data, nChars, &headerOk);
+    if (!rs) return headerOk ? 0 : -1;
+    InstallRules(rs);
+    return (LRESULT)ApplyRulesOnThisThread(NULL);
 }
 
 static LRESULT CALLBACK SinkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
+    case WM_COPYDATA: {
+        const COPYDATASTRUCT* cds = (const COPYDATASTRUCT*)lParam;
+        if (!cds || cds->dwData != OPAC_COPYDATA_RULES) return -1;
+        if (cds->cbData > OPAC_MAX_DOC_BYTES || (cds->cbData && !cds->lpData)) return -1;
+        return HandleRulesDoc((const WCHAR*)cds->lpData, cds->cbData / sizeof(WCHAR));
+    }
     case WM_OPAC_SET: {
-        {
-            Locker l;
-            g_state.argb       = (UINT32)(wParam & 0xFFFFFFFFu);
-            g_state.overrideOn = (lParam & OPAC_FLAG_ON) != 0;
-            g_state.hideStroke = (lParam & OPAC_FLAG_HIDE_STROKE) != 0;
+        // v1 compatibility: expressed as an equivalent rules document.
+        WCHAR doc[512];
+        doc[0] = 0;
+        AppendW(doc, ARRAYSIZE(doc), L"opacbar-rules 2\n");
+        if (lParam & OPAC_FLAG_ON) {
+            static const WCHAR hex[] = L"0123456789ABCDEF";
+            const UINT32 argb = (UINT32)(wParam & 0xFFFFFFFFu);
+            WCHAR color[10];
+            color[0] = L'#';
+            for (int i = 0; i < 8; i++) color[1 + i] = hex[(argb >> (28 - 4 * i)) & 0xF];
+            color[9] = 0;
+            AppendW(doc, ARRAYSIZE(doc), L"Taskbar.TaskbarBackground > *#BackgroundFill\tFill\t");
+            AppendW(doc, ARRAYSIZE(doc), color);
+            AppendW(doc, ARRAYSIZE(doc), L"\n");
+            if (lParam & OPAC_FLAG_HIDE_STROKE)
+                AppendW(doc, ARRAYSIZE(doc), L"Taskbar.TaskbarBackground > *#BackgroundStroke\tFill\t#00000000\n");
         }
-        return (LRESULT)ApplyCurrentState();
+        LRESULT r = HandleRulesDoc(doc, wcslen(doc));
+        return r < 0 ? 0 : r;
     }
     case WM_OPAC_RESTORE: {
-        {
-            Locker l;
-            g_state.overrideOn = false;
-        }
-        return (LRESULT)ApplyCurrentState();
+        InstallRules(NULL);
+        UINT restored = 0;
+        ApplyRulesOnThisThread(&restored);
+        return (LRESULT)restored;
     }
     case WM_OPAC_PING:
         return OPAC_PING_REPLY;
-    case WM_OPAC_PENDING: {
-        bool on;
-        {
-            Locker l;
-            on = g_state.overrideOn;
-        }
-        if (on) ApplyCurrentState();
+    case WM_OPAC_VERSION:
+        return OPAC_PROTOCOL_VERSION;
+    case WM_OPAC_DUMP:
+        return DumpTree((HWND)wParam, hwnd);
+    case WM_OPAC_PENDING:
+        ApplyRulesOnThisThread(NULL);
         return 0;
-    }
     case WM_NCDESTROY:
         ForgetThread(GetCurrentThreadId(), hwnd);
         break;
@@ -766,9 +1991,10 @@ static HWND EnsureSink(DWORD tid)
         if (ts) {
             if (ts->sink != NULL) {
                 // Old sink from a dead thread whose id got reused: start fresh.
-                ts->nBrushes = 0;
+                DropThreadRecordsLocked(tid);
+                ZeroMemory(ts->cache, sizeof(ts->cache));
                 ts->nextEvict = 0;
-                ZeroMemory(ts->brushes, sizeof(ts->brushes));
+                ts->pendingPosted = FALSE;
             }
             ts->sink = hwnd;
             stored = true;
@@ -840,6 +2066,17 @@ public:
         if (old) old->Release();
         if (!site) return S_OK;
 
+        // IXamlDiagnostics (optional: only needed for XAML values).
+        IXamlDiagnostics* diag = NULL;
+        if (FAILED(site->QueryInterface(IID_IXamlDiagnostics, (void**)&diag))) diag = NULL;
+        if (diag) {
+            {
+                Locker l;
+                if (!g_diag) { g_diag = diag; diag = NULL; }   // keep this reference forever
+            }
+            if (diag) diag->Release();
+        }
+
         IVisualTreeService* svc = NULL;
         HRESULT hr = site->QueryInterface(IID_IVisualTreeService, (void**)&svc);
         if (FAILED(hr)) return hr;
@@ -899,35 +2136,55 @@ public:
     {
         UINT64 handle = element.Handle ? element.Handle : relation.Child;
         if (handle == 0) return S_OK;
+        const DWORD tid = GetCurrentThreadId();
 
         if (mutationType == Add) {
-            bool inBg = element.Type && wcsstr(element.Type, L"TaskbarBackground") != NULL;
-            int kind = -1;
-            BYTE winui = 0;
-            const DWORD tid = GetCurrentThreadId();
+            const bool isFrame = IsFrameType(element.Type);
+            if (isFrame) EnsureSink(tid);   // creates the window outside the lock
+
+            HWND post = NULL;
             {
                 Locker l;
-                if (!inBg && relation.Parent) {
-                    MapSlot* p = MapFind(relation.Parent);
-                    if (p && (p->flags & NODE_IN_BG)) inBg = true;
+                UINT16 typeId = InternLocked(element.Type, element.Type ? SysStringLen(element.Type) : 0);
+                UINT16 nameId = InternLocked(element.Name, element.Name ? SysStringLen(element.Name) : 0);
+                MapPut(handle, relation.Parent, tid, relation.ChildIndex, typeId, nameId);
+                if (isFrame) MarkRootLocked(handle);
+                if (g_rules && g_rules->count) {
+                    ThreadState* ts = FindThread(tid);
+                    if (ts && ts->sink && !ts->pendingPosted) {
+                        ts->pendingPosted = TRUE;
+                        post = ts->sink;
+                    }
                 }
-                MapPut(handle, relation.Parent, inBg ? NODE_IN_BG : 0);
-
-                if (inBg && IsRectangleType(element.Type, &winui)) {
-                    if (StrEq(element.Name, L"BackgroundFill"))        kind = KIND_FILL;
-                    else if (StrEq(element.Name, L"BackgroundStroke")) kind = KIND_STROKE;
-                }
-                if (kind >= 0 && !AddTarget(handle, tid, (BYTE)kind, winui)) kind = -1;
             }
-            if (kind >= 0) {
-                // Don't touch XAML from inside the callback: defer to our window proc.
-                HWND sink = EnsureSink(tid);
-                if (sink) PostMessageW(sink, WM_OPAC_PENDING, 0, 0);
+            // Don't touch XAML from inside the callback: defer to our window proc.
+            if (post && !PostMessageW(post, WM_OPAC_PENDING, 0, 0)) {
+                Locker l;
+                ThreadState* ts = FindThread(tid);
+                if (ts) ts->pendingPosted = FALSE;
             }
         } else if (mutationType == Remove) {
+            // Forget applied records on the removed element or below it (no restore: the
+            // element is leaving the tree), in batches so XAML objects are released
+            // outside the lock.
+            for (;;) {
+                Record taken[16];
+                UINT nt = 0;
+                {
+                    Locker l;
+                    for (UINT32 i = 0; i < g_recHigh && nt < 16; i++) {
+                        Record& r = g_recs[i];
+                        if (r.element && IsUnderLocked(r.element, handle)) {
+                            taken[nt++] = r;
+                            ZeroMemory(&r, sizeof(Record));
+                        }
+                    }
+                }
+                for (UINT i = 0; i < nt; i++) FreeRecordResources(taken[i], true);
+                if (nt < 16) break;
+            }
             Locker l;
-            DropTargetsUnder(handle);
-            MapErase(handle);
+            MapEraseSubtree(handle);
         }
         return S_OK;
     }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
@@ -8,15 +8,11 @@ namespace Opacbar
 {
     public class OpacTrayContext : ApplicationContext
     {
-        private static readonly string[] StyleNames = new string[] { "Clear", "Tint", "Blur", "Acrylic", "Solid", "Windows default" };
-        private static readonly TaskbarStyleMode[] StyleModes = new TaskbarStyleMode[]
+        private static readonly string[] StyleNames = new string[] { "Clear", "Color", "Blur", "Acrylic", "Windows default" };
+        private static readonly Material[] StyleModes = new Material[]
         {
-            TaskbarStyleMode.Clear, TaskbarStyleMode.Tinted, TaskbarStyleMode.Blur,
-            TaskbarStyleMode.Acrylic, TaskbarStyleMode.Solid, TaskbarStyleMode.Normal
+            Material.Clear, Material.Color, Material.Blur, Material.Acrylic, Material.Windows
         };
-        private static readonly string[] CornerNames = new string[] { "Square", "Soft", "Round", "Pill" };
-        private static readonly int[] CornerRadii = new int[] { 0, 8, 16, 24 };
-
         private readonly AppConfig _config;
         private TaskbarEngine _engine;
         private NotifyIcon _trayIcon;
@@ -26,9 +22,8 @@ namespace Opacbar
         private Control _marshal;
         private RegisteredWaitHandle _showWait;
 
-        private ToolStripMenuItem _miSettings, _miEnabled, _miFloating, _miStartup;
-        private readonly ToolStripMenuItem[] _miStyles = new ToolStripMenuItem[6];
-        private readonly ToolStripMenuItem[] _miCorners = new ToolStripMenuItem[4];
+        private ToolStripMenuItem _miSettings, _miEnabled, _miStartup;
+        private readonly ToolStripMenuItem[] _miStyles = new ToolStripMenuItem[5];
 
         public OpacTrayContext(bool startMinimized, bool firstRun, EventWaitHandle showEvent)
         {
@@ -132,33 +127,13 @@ namespace Opacbar
                 mi.Click += delegate
                 {
                     _config.Enabled = true;
-                    _config.DesktopProfile.Mode = StyleModes[idx];
+                    _config.DesktopProfile.Material = StyleModes[idx];
+                    if (StyleModes[idx] != Material.Clear && StyleModes[idx] != Material.Windows && _config.DesktopProfile.Opacity < 10)
+                        _config.DesktopProfile.Opacity = 60;
                     ApplyAndSave();
                 };
                 _miStyles[i] = mi;
                 style.DropDownItems.Add(mi);
-            }
-
-            _miFloating = new ToolStripMenuItem("Floating");
-            _miFloating.Click += delegate
-            {
-                _config.FloatingPillEnabled = !_config.FloatingPillEnabled;
-                ApplyAndSave();
-            };
-
-            ToolStripMenuItem corners = new ToolStripMenuItem("Corners");
-            for (int i = 0; i < CornerNames.Length; i++)
-            {
-                int idx = i;
-                ToolStripMenuItem mi = new ToolStripMenuItem(CornerNames[i]);
-                mi.Click += delegate
-                {
-                    _config.FloatingPillEnabled = true;
-                    _config.CornerRadius = CornerRadii[idx];
-                    ApplyAndSave();
-                };
-                _miCorners[i] = mi;
-                corners.DropDownItems.Add(mi);
             }
 
             _miStartup = new ToolStripMenuItem("Start with Windows");
@@ -175,13 +150,11 @@ namespace Opacbar
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(_miEnabled);
             _menu.Items.Add(style);
-            _menu.Items.Add(_miFloating);
-            _menu.Items.Add(corners);
             _menu.Items.Add(_miStartup);
             _menu.Items.Add(new ToolStripSeparator());
             _menu.Items.Add(quit);
 
-            foreach (ToolStripMenuItem sub in new ToolStripMenuItem[] { style, corners })
+            foreach (ToolStripMenuItem sub in new ToolStripMenuItem[] { style })
             {
                 ToolStripDropDownMenu dd = sub.DropDown as ToolStripDropDownMenu;
                 if (dd != null)
@@ -244,15 +217,11 @@ namespace Opacbar
             if (old != null) old.Dispose();
 
             _miEnabled.Checked = _config.Enabled;
-            _miFloating.Checked = _config.FloatingPillEnabled;
             _miStartup.Checked = _config.LaunchAtStartup;
 
-            TaskbarStyleMode m = _config.DesktopProfile.Mode;
+            Material m = _config.DesktopProfile.Material;
             for (int i = 0; i < _miStyles.Length; i++) _miStyles[i].Checked = (StyleModes[i] == m);
-            for (int i = 0; i < _miCorners.Length; i++)
-                _miCorners[i].Checked = _config.FloatingPillEnabled && _config.CornerRadius == CornerRadii[i];
         }
-
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
         {
             if (e.Category != UserPreferenceCategory.General && e.Category != UserPreferenceCategory.Color) return;
@@ -405,3 +374,4 @@ namespace Opacbar
         }
     }
 }
+
