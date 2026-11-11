@@ -42,10 +42,14 @@ namespace Opacbar
                     break;
                 default:
                     // Blur (and the legacy Acrylic / Windows values): adjustable blur drawn by the helper
-                    // (protocol v6), "@blur:<radius 0-100>[:#AARRGGBB tint][:host]". ":host" samples the desktop
-                    // behind the taskbar window; the default backdrop only sees the (empty) taskbar island.
+                    // (protocol v6), "@blur:<radius 0-100>[:#AARRGGBB tint]". Uses the compositor's normal
+                    // backdrop (what is behind the bar on screen). ":host" (HostBackdropBrush) is NOT used:
+                    // the taskbar window has no host backdrop, so it renders solid (verified on 26300).
+                    // Slider 0-100 -> Gaussian standard deviation 0-25 DIPs (higher values all look the same
+                    // on a 48 px bar).
                     int amount = Math.Max(0, Math.Min(100, p.BlurAmount));
-                    AppendRule(sb, FillSelector, "Fill", "@blur:" + amount.ToString(CultureInfo.InvariantCulture) + ":" + tint + ":host");
+                    string radius = (amount / 4.0).ToString("0.##", CultureInfo.InvariantCulture);
+                    AppendRule(sb, FillSelector, "Fill", "@blur:" + radius + ":" + tint);
                     break;
             }
 
