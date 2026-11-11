@@ -48,7 +48,7 @@ jobs:
             # vcvars INCLUDE path). Explicit system libs first, windowsapp.lib last so it only
             # supplies the WinRT core imports; dxguid.lib = D2D1 effect CLSIDs (static data).
             $cmd = "`"$vcvars`" $($t.vc) >nul && " +
-                   "cl /nologo /LD /O2 /std:c++17 /EHsc /permissive- /bigobj /GS /guard:cf /W4 /DUNICODE /D_UNICODE " +
+                   "cl /nologo /LD /O2 /std:c++20 /EHsc /permissive- /bigobj /GS /guard:cf /W4 /DUNICODE /D_UNICODE " +
                    "/Fo$obj\ native\OpacbarTAP.cpp /Fe:$dll " +
                    "/link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT " +
                    "kernel32.lib ole32.lib oleaut32.lib user32.lib dxguid.lib windowsapp.lib && " +
