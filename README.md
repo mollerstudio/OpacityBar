@@ -8,10 +8,9 @@ Opacbar is a single portable `.exe` plus a tiny helper DLL. No installer, no adm
 
 ## Features
 
-- **Taskbar looks:** Clear, Color, Blur, Acrylic, or Windows default. Pick any color with the built-in picker (saturation/value square, hue strip, hex, quick and recent swatches) and an opacity.
+- **Taskbar looks:** Clear, Color, or Blur. Color: pick any color with the built-in picker (saturation/value square, hue strip, hex, quick and recent swatches) and an opacity. Blur is Windows' own frosted taskbar material. One look applies everywhere.
 - **True transparency on Windows 11:** only the taskbar's background is recolored, so icons, text and the clock stay fully opaque. A completely clear (alpha 0) background is possible.
 - **Floating pills:** in development.
-- **Per-situation looks:** use a different look when an app is maximized, when Start is open, or when battery saver is on.
 - **Tray icon:** left-click opens settings, right-click opens a quick menu.
 - **Emergency quit:** `Ctrl+Shift+Alt+Q` quits Opacbar and restores the stock taskbar.
 - Restores the normal Windows taskbar when it exits.
@@ -39,7 +38,7 @@ The top of the source file explains this in plain English. The helper is a singl
 
 Opacbar copies the helper to `%LocalAppData%\Opacbar\helper` before loading it, so the original next to the exe is never locked. The helper stays loaded until Explorer restarts. Restarting Explorer or signing out removes it completely.
 
-Blur and Acrylic are drawn as XAML brushes by the same helper. On Windows 10 (build below 22000) Opacbar uses the classic DWM accent policy instead and needs no helper. If the helper is missing, Opacbar tells you and the taskbar keeps its stock look.
+Blur leaves Windows' own taskbar material untouched; it is the only blur that renders reliably on the Windows 11 taskbar. Clear hides that layer, Color replaces its brush, and switching back restores the original exactly. On Windows 10 (build below 22000) Opacbar uses the classic DWM accent policy instead and needs no helper. If the helper is missing, Opacbar tells you and the taskbar keeps its stock look.
 
 ---
 

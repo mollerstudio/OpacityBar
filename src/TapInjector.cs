@@ -69,8 +69,37 @@ namespace Opacbar
         // Must equal OPAC_PROTOCOL_VERSION in native/OpacbarTAP.cpp. An older helper found in Explorer
         // triggers an automatic Explorer restart (Windows accepts only ONE injection per Explorer process:
         // later InitializeXamlDiagnosticsEx calls into the same process fail with 0x80070490).
-        private const int ProtocolVersion = 4;
+        private const int ProtocolVersion = 5;
+        // Small local diagnostics log (%LOCALAPPDATA%\Opacbar\opacbar.log, max ~256 KB, never sent anywhere).
+        private static readonly object LogLock = new object();
+        public static string LogPath
+        {
+            get { return System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Opacbar", "opacbar.log"); }
+        }
+        public static void Log(string msg)
+        {
+            try
+            {
+                lock (LogLock)
+                {
+                    string p = LogPath;
+                    System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(p));
+                    System.IO.FileInfo fi = new System.IO.FileInfo(p);
+                    if (fi.Exists && fi.Length > 256 * 1024)
+                    {
+                        string old = p + ".old";
+                        if (System.IO.File.Exists(old)) System.IO.File.Delete(old);
+                        System.IO.File.Move(p, old);
+                    }
+                    System.IO.File.AppendAllText(p, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + msg + Environment.NewLine);
+                }
+            }
+            catch { }
+        }
+
         private uint _injectedOkPid;            // Explorer we already injected successfully (never inject twice)
+        private long _threadStartMs;
+        private volatile int _attemptGen;
         private long _injectOkAtMs;
         private long _lastAutoRestartMs = -10000000;
         private int _autoRestarts;
@@ -298,6 +327,7 @@ namespace Opacbar
 
             if (explorerPid != 0 && explorerPid != _lastPid)
             {
+                Log("explorer pid changed " + _lastPid + " -> " + explorerPid);
                 // New Explorer: forget old backoff; the new shell has no helper yet.
                 _lastPid = explorerPid;
                 _failCount = 0;
@@ -382,6 +412,7 @@ namespace Opacbar
 
             if (good.Count > 0)
             {
+                if (_status != TapStatus.Alive) Log("helper connected: " + good.Count + " sink(s), version " + SinkVersion(good[0]));
                 _failCount = 0;
                 HashSet<long> live = new HashSet<long>();
                 foreach (IntPtr s in good) live.Add(s.ToInt64());
@@ -442,6 +473,7 @@ namespace Opacbar
             {
                 if (styled)
                 {
+                    if (_status != TapStatus.Outdated) Log("older helper found in explorer (need version " + ProtocolVersion + ")");
                     // Older helper still loaded in Explorer: restart Explorer automatically to load ours.
                     if (!TryAutoRestart(now, "Updating the taskbar helper (restarting Explorer)..."))
                     {
@@ -473,7 +505,20 @@ namespace Opacbar
                 _detail = "";
             }
 
-            if (_thread != null) return; // injection running; wait for it
+            if (_thread != null)
+            {
+                // InitializeXamlDiagnosticsEx can hang forever (e.g. Explorer died mid-connection).
+                // Abandon a stuck attempt after 10 s; its late result is ignored (generation check).
+                if (now - _threadStartMs < 10000) return;
+                Log("inject attempt " + _attemptGen + " hung for 10 s: abandoned");
+                Interlocked.Increment(ref _attemptGen);
+                _thread = null;
+                _failCount++;
+                _nextAttemptMs = now + 2000;
+                _status = TapStatus.Injecting;
+                _detail = "Connecting to the taskbar is taking long; retrying...";
+                return;
+            }
 
             // Already injected into this Explorer: never call InitializeXamlDiagnosticsEx again (it would
             // fail with 0x80070490). Give the helper time to start; if it never answers, restart Explorer.
@@ -556,18 +601,47 @@ namespace Opacbar
             _threadHr = 0;
             _threadError = null;
             _injectedPid = pid;
-            string endpoint = "VisualDiagConnection" + Interlocked.Increment(ref _endpointCounter);
+            _threadStartMs = Clock.ElapsedMilliseconds;
+            int gen = Interlocked.Increment(ref _attemptGen);
+            // Must be exactly "VisualDiagConnection1": with any other name (…2, …3) every call fails with
+            // 0x80070490 (verified on Win11 26300 via the connection log). TranslucentTB uses the same name.
+            string endpoint = "VisualDiagConnection1";
+            Interlocked.Increment(ref _endpointCounter);
+            Log("inject start: explorer pid " + pid + " (age " + (int)ExplorerAgeSeconds(pid) + " s), " + endpoint + ", attempt " + gen);
             Thread t = new Thread(delegate ()
             {
+                int hr;
+                string err = null;
                 try
                 {
-                    _threadHr = NativeMethods.InitializeXamlDiagnosticsEx(endpoint, pid, null, dll, TapClsid, null);
+                    // Run the injection in a fresh copy of Opacbar.exe (see Program.Main): a process
+                    // can only inject successfully once, so doing it in-process works only the first time.
+                    ProcessStartInfo psi = new ProcessStartInfo(
+                        System.Reflection.Assembly.GetExecutingAssembly().Location,
+                        "--inject " + pid + " " + endpoint + " \"" + dll + "\"");
+                    psi.UseShellExecute = false;
+                    psi.CreateNoWindow = true;
+                    using (Process p = Process.Start(psi))
+                    {
+                        if (p.WaitForExit(15000)) hr = p.ExitCode;
+                        else
+                        {
+                            try { p.Kill(); } catch { }
+                            hr = unchecked((int)0x800705B4); // ERROR_TIMEOUT
+                            err = "injector process timed out";
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
-                    _threadHr = unchecked((int)0x80004005);
-                    _threadError = ex.Message;
+                    hr = unchecked((int)0x80004005);
+                    err = ex.Message;
                 }
+                Log("inject result: attempt " + gen + " hr=0x" + hr.ToString("X8") + (err != null ? " (" + err + ")" : "") +
+                    (gen != _attemptGen ? " [ignored: attempt was abandoned]" : ""));
+                if (gen != _attemptGen) return; // abandoned attempt: ignore its result
+                _threadHr = hr;
+                _threadError = err;
                 _threadDone = true;
             });
             t.IsBackground = true;
@@ -596,7 +670,7 @@ namespace Opacbar
                 // (an earlier Opacbar run / an old helper) and Windows refuses another one. Wait a little
                 // after Explorer starts; after that, restart Explorer automatically.
                 if (_startingSinceMs == 0) _startingSinceMs = now;
-                if (ExplorerAgeSeconds(pid) > 20 && now - _startingSinceMs > 3000 &&
+                if (ExplorerAgeSeconds(pid) > 45 && now - _startingSinceMs > 15000 &&
                     TryAutoRestart(now, "Reconnecting to the taskbar (restarting Explorer)..."))
                 {
                     _startingSinceMs = 0;
@@ -723,6 +797,32 @@ namespace Opacbar
 
         public bool IsRestarting { get { return _restarting; } }
 
+        /// <summary>
+        /// Body of "Opacbar.exe --inject pid endpoint dll": performs exactly one injection on this
+        /// (STA) main thread, keeps the process alive briefly while Explorer completes the
+        /// connection, and returns the HRESULT as the exit code.
+        /// </summary>
+        public static int RunInjectorProcess(string pidText, string endpoint, string dll)
+        {
+            uint pid;
+            if (!uint.TryParse(pidText, out pid) || pid == 0 || !System.IO.File.Exists(dll))
+                return unchecked((int)0x80070057); // E_INVALIDARG
+            int hr;
+            try { hr = NativeMethods.InitializeXamlDiagnosticsEx(endpoint, pid, null, dll, TapClsid, null); }
+            catch { return unchecked((int)0x80004005); }
+            if (hr >= 0)
+            {
+                // Let Explorer finish the handshake (it calls back into this process) before exiting.
+                long until = Environment.TickCount + 3000;
+                while (unchecked(Environment.TickCount - until) < 0)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    Thread.Sleep(50);
+                }
+            }
+            return hr;
+        }
+
         // Waits until a taskbar owned by a different process than oldPid exists.
         private static bool WaitForNewShell(uint oldPid, int timeoutMs)
         {
@@ -748,7 +848,12 @@ namespace Opacbar
         private bool TryAutoRestart(long now, string detail)
         {
             if (_restarting) return true;
-            if (_autoRestarts >= 3 || now - _lastAutoRestartMs < 120000) return false;
+            if (_autoRestarts >= 3 || now - _lastAutoRestartMs < 120000)
+            {
+                Log("auto-restart wanted but rate-limited (" + _autoRestarts + " so far): " + detail);
+                return false;
+            }
+            Log("auto-restart #" + (_autoRestarts + 1) + ": " + detail);
             _autoRestarts++;
             _lastAutoRestartMs = now;
             _status = TapStatus.Injecting;

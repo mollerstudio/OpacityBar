@@ -8,10 +8,10 @@ namespace Opacbar
 {
     public class OpacTrayContext : ApplicationContext
     {
-        private static readonly string[] StyleNames = new string[] { "Clear", "Color", "Blur", "Acrylic", "Windows default" };
+        private static readonly string[] StyleNames = new string[] { "Clear", "Color", "Blur" };
         private static readonly Material[] StyleModes = new Material[]
         {
-            Material.Clear, Material.Color, Material.Blur, Material.Acrylic, Material.Windows
+            Material.Clear, Material.Color, Material.Blur
         };
         private readonly AppConfig _config;
         private TaskbarEngine _engine;
@@ -23,7 +23,7 @@ namespace Opacbar
         private RegisteredWaitHandle _showWait;
 
         private ToolStripMenuItem _miSettings, _miEnabled, _miStartup;
-        private readonly ToolStripMenuItem[] _miStyles = new ToolStripMenuItem[5];
+        private readonly ToolStripMenuItem[] _miStyles = new ToolStripMenuItem[StyleNames.Length];
 
         public OpacTrayContext(bool startMinimized, bool firstRun, EventWaitHandle showEvent)
         {
@@ -128,7 +128,7 @@ namespace Opacbar
                 {
                     _config.Enabled = true;
                     _config.DesktopProfile.Material = StyleModes[idx];
-                    if (StyleModes[idx] != Material.Clear && StyleModes[idx] != Material.Windows && _config.DesktopProfile.Opacity < 10)
+                    if (StyleModes[idx] == Material.Color && _config.DesktopProfile.Opacity < 10)
                         _config.DesktopProfile.Opacity = 60;
                     ApplyAndSave();
                 };
@@ -220,6 +220,7 @@ namespace Opacbar
             _miStartup.Checked = _config.LaunchAtStartup;
 
             Material m = _config.DesktopProfile.Material;
+            if (m == Material.Acrylic || m == Material.Windows) m = Material.Blur;   // merged into Blur
             for (int i = 0; i < _miStyles.Length; i++) _miStyles[i].Checked = (StyleModes[i] == m);
         }
         private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -329,8 +330,16 @@ namespace Opacbar
         private static Mutex _singleInstanceMutex;
 
         [STAThread]
-        public static void Main(string[] args)
+        public static int Main(string[] args)
         {
+            // Short-lived injector mode (started by TapHelper). Windows allows a process to call
+            // InitializeXamlDiagnosticsEx successfully only ONCE in its lifetime; every later call
+            // fails with 0x80070490. So each injection runs in a fresh copy of Opacbar.exe:
+            //   Opacbar.exe --inject <explorerPid> <endpoint> <helperDllPath>
+            // The exit code is the HRESULT. This mode shows no UI and skips the single-instance check.
+            if (args != null && args.Length == 4 && args[0] == "--inject")
+                return TapHelper.RunInjectorProcess(args[1], args[2], args[3]);
+
             bool createdNew;
             _singleInstanceMutex = new Mutex(true, MutexName, out createdNew);
             if (!createdNew)
@@ -343,7 +352,7 @@ namespace Opacbar
                         ev.Set();
                 }
                 catch { }
-                return;
+                return 0;
             }
 
             EventWaitHandle showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
@@ -371,6 +380,7 @@ namespace Opacbar
 
             GC.KeepAlive(showEvent);
             GC.KeepAlive(_singleInstanceMutex);
+            return 0;
         }
     }
 }

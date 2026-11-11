@@ -18,7 +18,7 @@ namespace Opacbar
 
         private static readonly Material[] Materials = new Material[]
         {
-            Material.Clear, Material.Color, Material.Blur, Material.Acrylic, Material.Windows
+            Material.Clear, Material.Color, Material.Blur
         };
         private static int _lastTab;
 
@@ -188,7 +188,7 @@ namespace Opacbar
                 Commit();
             };
 
-            _style = new SegmentedControl("Clear", "Color", "Blur", "Acrylic", "Windows");
+            _style = new SegmentedControl("Clear", "Color", "Blur");
             _style.SelectedIndexChanged += delegate
             {
                 if (_syncing) return;
@@ -412,7 +412,9 @@ namespace Opacbar
                 int idx = Math.Max(0, _situation.SelectedIndex);
                 StyleProfile p = CurrentProfile();
                 ((ToggleSwitch)_useDifferent.Trailing).Checked = GetSituationEnabled(idx);
-                _style.SelectedIndex = Array.IndexOf(Materials, p.Material);
+                // Acrylic and Windows were merged into Blur (all three are Windows' own frosted taskbar now).
+                Material shown = (p.Material == Material.Acrylic || p.Material == Material.Windows) ? Material.Blur : p.Material;
+                _style.SelectedIndex = Array.IndexOf(Materials, shown);
                 _opacity.Value = p.Opacity;
                 Color pc = ColorMath.Parse(p.Color, Color.Black);
                 _picker.Recents = _config.RecentColors;
@@ -440,15 +442,17 @@ namespace Opacbar
             bool tinted = IsTinted(m);
 
             _style.Enabled = look;
-            _colorRow.Visible = tinted;
+            bool blurry = m == Material.Blur || m == Material.Acrylic || m == Material.Windows;
+            bool colored = m == Material.Color;   // Windows' own blur can't be tinted or weakened
+            _colorRow.Visible = colored;
             _colorRow.Enabled = look;
             _colorRow.Expanded = _pickerOpen;
-            _picker.Visible = tinted && look && _pickerOpen;
-            _opacity.Visible = tinted;
+            _picker.Visible = colored && look && _pickerOpen;
+            _opacity.Label = "Opacity";
+            _opacity.Visible = colored;
             _opacity.Enabled = look;
-            _topLine.Enabled = look && m != Material.Windows;
+            _topLine.Enabled = look;
 
-            bool blurry = m == Material.Blur || m == Material.Acrylic;
             _hint.Visible = blurry;
             if (blurry)
             {
@@ -523,6 +527,12 @@ namespace Opacbar
             else if (health == EngineHealth.HelperMissing)
             {
                 text = "Helper missing";
+                dot = Theme.Warning;
+                note = _engine.HealthDetail;
+            }
+            else if (health == EngineHealth.Connecting)
+            {
+                text = "Connecting to the taskbar...";
                 dot = Theme.Warning;
                 note = _engine.HealthDetail;
             }

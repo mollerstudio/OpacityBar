@@ -110,7 +110,8 @@
 #define WM_OPAC_SHUTDOWN      (WM_APP + 0x18)  // Internal: restore this thread, destroy this sink.
 #define WM_OPAC_UNLOAD_RUN    (WM_APP + 0x19)  // Internal: control thread finishes the unload.
 #define OPAC_PING_REPLY       0x0BAC
-#define OPAC_PROTOCOL_VERSION 4   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD, 4 = tree service via IXamlDiagnostics
+#define OPAC_PROTOCOL_VERSION 5   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD, 4 = tree service via IXamlDiagnostics,
+                                  // 5 = originals kept alive (exact restore of Explorer's acrylic brush)
                                   // Bump on EVERY helper change: Opacbar restarts Explorer to load a newer helper.
 #define OPAC_FLAG_ON          0x1              // v1 SET bit0: override on
 #define OPAC_FLAG_HIDE_STROKE 0x2              // v1 SET bit1: make BackgroundStroke transparent too
@@ -927,6 +928,9 @@ struct Record {
     BSTR             origType;
     BSTR             origValue;
     IInspectableAbi* xamlObj;      // one reference to a XamlReader-created value we set
+    IInspectableAbi* origObj;      // one reference to the ORIGINAL object value (kOrigHandle), so it
+                                   // cannot be destroyed while replaced and can be put back exactly
+                                   // (e.g. Explorer's acrylic taskbar brush).
 };
 static Record g_recs[MAX_RECORDS];
 static UINT32 g_recHigh = 0;   // records live in [0, g_recHigh)
@@ -959,6 +963,8 @@ static void FreeRecordResources(Record& r, bool releaseObject)
     r.origValue = NULL;
     if (r.xamlObj && releaseObject) r.xamlObj->Release();
     r.xamlObj = NULL;
+    if (r.origObj && releaseObject) r.origObj->Release();
+    r.origObj = NULL;
 }
 
 // Thread went away (or its id got reused): forget its records without touching XAML.
@@ -1366,6 +1372,7 @@ static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, cons
         BYTE origKind = kOrigNone;
         UINT64 origHandle = 0;
         BSTR origType = NULL, origValue = NULL;
+        IInspectableAbi* origObj = NULL;
         if (eff >= 0) {
             const PropertyChainValue& v = c->vals[eff];
             bool isLocal = c->srcs && v.PropertyChainIndex < c->srcCount &&
@@ -1373,7 +1380,20 @@ static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, cons
             if (isLocal) {
                 if (v.MetadataBits & IsValueHandle) {
                     origHandle = ParseDecimal(v.Value);
-                    if (origHandle) origKind = kOrigHandle;
+                    if (origHandle) {
+                        origKind = kOrigHandle;
+                        // Hold the original object alive while our value replaces it.
+                        IXamlDiagnostics* d = NULL;
+                        {
+                            Locker l;
+                            d = g_diag;
+                            if (d) d->AddRef();
+                        }
+                        if (d) {
+                            if (FAILED(d->GetIInspectableFromHandle(origHandle, &origObj))) origObj = NULL;
+                            d->Release();
+                        }
+                    }
                 } else if (v.Value) {
                     const WCHAR* t = (v.ValueType && *v.ValueType) ? v.ValueType : v.Type;
                     if (t && *t) {
@@ -1404,6 +1424,7 @@ static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, cons
                     rec->origHandle = origHandle;
                     rec->origType = origType;
                     rec->origValue = origValue;
+                    rec->origObj = origObj;
                     rec->gen = 0;
                     reserved = true;
                 }
@@ -1412,6 +1433,7 @@ static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, cons
         if (!reserved) {
             SysFreeString(origType);
             SysFreeString(origValue);
+            if (origObj) origObj->Release();
             return false;
         }
     }
@@ -1484,6 +1506,22 @@ static bool RestoreRecord(IVisualTreeService* svc, const Record& r)
     if (r.origKind == kOrigHandle && r.origHandle &&
         SUCCEEDED(svc->SetProperty(r.element, r.origHandle, r.propIndex)))
         return true;
+    if (r.origKind == kOrigHandle && r.origObj) {
+        // Handle no longer registered: re-register the (still alive) original object and retry.
+        IXamlDiagnostics* d = NULL;
+        {
+            Locker l;
+            d = g_diag;
+            if (d) d->AddRef();
+        }
+        if (d) {
+            InstanceHandle h = 0;
+            bool ok = SUCCEEDED(d->GetHandleFromIInspectable(r.origObj, &h)) && h &&
+                      SUCCEEDED(svc->SetProperty(r.element, h, r.propIndex));
+            d->Release();
+            if (ok) return true;
+        }
+    }
     if (r.origKind == kOrigString && r.origType && r.origValue) {
         UINT64 h = 0;
         if (SUCCEEDED(svc->CreateInstance(r.origType, r.origValue, &h)) && h &&

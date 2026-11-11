@@ -23,7 +23,8 @@ namespace Opacbar
         NoTaskbar = 2,
         HelperMissing = 3,
         HelperFailed = 4,
-        HelperOutdated = 5
+        HelperOutdated = 5,
+        Connecting = 6
     }
 
     public class TaskbarEngine : IDisposable
@@ -144,10 +145,11 @@ namespace Opacbar
             if (IsWindows11())
             {
                 // Windows 11: everything goes through the XAML helper as brushes on the taskbar background.
-                bool styled = profile.Material != Material.Windows;
+                string doc = TaskbarStyle.Compile(profile);
+                bool styled = doc != TaskbarStyle.EmptyDocument();   // only load the helper when a rule exists
                 uint pid = 0;
                 NativeMethods.GetWindowThreadProcessId(taskbars[0], out pid);
-                try { _tap.Sync(pid, styled, TaskbarStyle.Compile(profile)); }
+                try { _tap.Sync(pid, styled, doc); }
                 catch (Exception ex)
                 {
                     health = EngineHealth.HelperFailed;
@@ -157,7 +159,9 @@ namespace Opacbar
                 // Blur / Acrylic: the helper made the XAML background transparent; the DWM accent on the
                 // taskbar window supplies the blur. Explorer resets accents, so this re-applies ~4x/s.
                 // When leaving Blur/Acrylic, put the accent back once so no stale blur remains.
-                bool blurry = profile.Material == Material.Blur || profile.Material == Material.Acrylic;
+                // The DWM blur accent renders black on the Win11 taskbar (verified on build 26300), so it is
+                // no longer applied; this loop only removes an accent a previous version may have left behind.
+                bool blurry = false;
                 foreach (IntPtr hwnd in taskbars)
                 {
                     if (blurry)
@@ -185,6 +189,8 @@ namespace Opacbar
                         case TapStatus.Failed: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
                         case TapStatus.Rejected: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
                         case TapStatus.Outdated: health = EngineHealth.HelperOutdated; detail = _tap.Detail; break;
+                        case TapStatus.Injecting: health = EngineHealth.Connecting; detail = _tap.Detail; break;
+                        case TapStatus.Idle: health = EngineHealth.Connecting; detail = ""; break;
                     }
                 }
                 if (_tap.HasPending && _fastTimer != null && !_fastTimer.Enabled) _fastTimer.Start();

@@ -32,11 +32,25 @@ namespace Opacbar
 
         public static string Compile(StyleProfile p)
         {
-            if (p == null || p.Material == Material.Windows) return EmptyDocument();
+            if (p == null) return EmptyDocument();
 
             StringBuilder sb = new StringBuilder();
             sb.Append(Header);
-            sb.Append('\n').Append(FillSelector).Append('\t').Append("Fill").Append('\t').Append(BrushFor(p));
+            // Blur (and the legacy Acrylic / Windows values) = Windows' own frosted taskbar material, untouched.
+            // It is the only blur that renders on the Win11 taskbar (verified on build 26300: XAML
+            // HostBackdrop acrylic shows only its fallback color; the DWM blur accent and system backdrop
+            // render black on the never-active taskbar window; fading the stock layer just ghosts a sharp
+            // image over a blurred one). Its Fill is never touched.
+            if (p.Material == Material.Clear)
+            {
+                // Clear hides Windows' layer instead of replacing its brush: an Opacity value is trivially
+                // restored, so switching back to Blur always brings the original frosted look back.
+                sb.Append('\n').Append(FillSelector).Append('\t').Append("Opacity").Append('\t').Append("0");
+            }
+            else if (p.Material == Material.Color)
+            {
+                sb.Append('\n').Append(FillSelector).Append('\t').Append("Fill").Append('\t').Append(BrushFor(p));
+            }
             if (p.HideTopLine)
                 sb.Append('\n').Append(StrokeSelector).Append('\t').Append("Fill").Append('\t').Append(Transparent);
             return sb.ToString();
