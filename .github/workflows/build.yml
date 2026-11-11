@@ -16,85 +16,58 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Native helper (native/OpacbarTAP.cpp) for x64 and ARM64, built with MSVC.
-  # ---------------------------------------------------------------------------
-  helper:
-    name: Build OpacbarTAP (${{ matrix.arch }})
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            msvc: x64
-            machine: 8664
-          - arch: arm64
-            msvc: amd64_arm64
-            machine: AA64
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v6
-
-      - name: Set up MSVC (${{ matrix.msvc }})
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: ${{ matrix.msvc }}
-
-      - name: Compile OpacbarTAP.${{ matrix.arch }}.dll
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force out, obj | Out-Null
-          $dll = "out/OpacbarTAP.${{ matrix.arch }}.dll"
-          cl /nologo /LD /O2 /EHs-c- /D_HAS_EXCEPTIONS=0 /GS /guard:cf /W4 `
-             /DUNICODE /D_UNICODE /Foobj\ native\OpacbarTAP.cpp /Fe:$dll `
-             /link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT `
-             ole32.lib oleaut32.lib user32.lib
-          if ($LASTEXITCODE -ne 0) { throw "cl failed with exit code $LASTEXITCODE" }
-          if (-not (Test-Path $dll)) { throw "$dll was not generated!" }
-
-          # Sanity checks: correct machine type and exactly the two expected exports.
-          $headers = dumpbin /nologo /headers $dll | Out-String
-          if ($headers -notmatch "${{ matrix.machine }} machine") { Write-Host $headers; throw "Unexpected machine type" }
-          $exports = dumpbin /nologo /exports $dll | Out-String
-          Write-Host $exports
-          foreach ($e in 'DllGetClassObject', 'DllCanUnloadNow') {
-            if ($exports -notmatch "\b$e\b") { throw "Missing export $e" }
-          }
-
-      - name: Upload helper DLL
-        uses: actions/upload-artifact@v6
-        with:
-          name: OpacbarTAP-${{ matrix.arch }}
-          path: out/OpacbarTAP.${{ matrix.arch }}.dll
-          if-no-files-found: error
-
-  # ---------------------------------------------------------------------------
-  # Opacbar.exe (built-in .NET Framework csc via build.ps1) + packaging/release.
+  # One job builds everything: the native helper (native/OpacbarTAP.cpp) for x64
+  # and ARM64 with MSVC, and Opacbar.exe with the built-in .NET Framework csc.
+  # No intermediate artifacts, so the private-repo artifact quota is barely used.
   # ---------------------------------------------------------------------------
   build:
     name: Build and package Opacbar
     runs-on: windows-latest
-    needs: helper
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v6
+
+      - name: Compile helper DLLs (x64 + ARM64)
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvarsall.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvarsall.bat not found" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $targets = @(
+            @{ arch = 'x64';   vc = 'x64';         machine = '8664' },
+            @{ arch = 'arm64'; vc = 'amd64_arm64'; machine = 'AA64' }
+          )
+          foreach ($t in $targets) {
+            $obj = "obj_$($t.arch)"
+            New-Item -ItemType Directory -Force $obj | Out-Null
+            $dll = "dist\OpacbarTAP.$($t.arch).dll"
+            $cmd = "`"$vcvars`" $($t.vc) >nul && " +
+                   "cl /nologo /LD /O2 /EHs-c- /D_HAS_EXCEPTIONS=0 /GS /guard:cf /W4 /DUNICODE /D_UNICODE " +
+                   "/Fo$obj\ native\OpacbarTAP.cpp /Fe:$dll " +
+                   "/link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT ole32.lib oleaut32.lib user32.lib && " +
+                   "dumpbin /nologo /headers $dll > $obj\headers.txt && " +
+                   "dumpbin /nologo /exports $dll > $obj\exports.txt"
+            cmd /c $cmd
+            if ($LASTEXITCODE -ne 0) { throw "Building $dll failed (exit $LASTEXITCODE)" }
+
+            # Sanity checks: correct machine type and exactly the two expected exports.
+            $headers = Get-Content "$obj\headers.txt" -Raw
+            if ($headers -notmatch "$($t.machine) machine") { Write-Host $headers; throw "Unexpected machine type for $dll" }
+            $exports = Get-Content "$obj\exports.txt" -Raw
+            Write-Host $exports
+            foreach ($e in 'DllGetClassObject', 'DllCanUnloadNow') {
+              if ($exports -notmatch "\b$e\b") { throw "Missing export $e in $dll" }
+            }
+          }
 
       - name: Compile Opacbar.exe
         shell: pwsh
         run: |
           ./build.ps1
-          if (-not (Test-Path "dist/Opacbar.exe")) {
-            throw "dist/Opacbar.exe was not generated!"
-          }
-
-      - name: Download helper DLLs
-        uses: actions/download-artifact@v7
-        with:
-          pattern: OpacbarTAP-*
-          path: dist
-          merge-multiple: true
+          if (-not (Test-Path "dist/Opacbar.exe")) { throw "dist/Opacbar.exe was not generated!" }
 
       - name: Checksums and portable ZIP
         shell: pwsh
@@ -115,17 +88,29 @@ jobs:
             "dist/Opacbar.exe", "dist/OpacbarTAP.x64.dll", "dist/OpacbarTAP.arm64.dll", `
             "dist/SHA256SUMS.txt", "dist/README.md", "dist/LICENSE"
 
+      # Short-lived copy on the run page. Never fails the build if the storage quota is full.
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v6
+        continue-on-error: true
         with:
           name: Opacbar-Windows
-          path: |
-            dist/Opacbar.exe
-            dist/OpacbarTAP.x64.dll
-            dist/OpacbarTAP.arm64.dll
-            dist/Opacbar-Windows-Portable.zip
-            dist/SHA256SUMS.txt
+          path: dist/Opacbar-Windows-Portable.zip
+          retention-days: 3
           if-no-files-found: error
+
+      # Rolling "Latest build" pre-release, updated on every push to main. Release assets do
+      # not count against the Actions artifact quota. Find it under Releases on the repo page.
+      - name: Update "Latest build" pre-release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "Automatic build of commit ${{ github.sha }}. Download Opacbar-Windows-Portable.zip, unzip, run Opacbar.exe."
+          gh release delete latest-build --yes --cleanup-tag 2>$null
+          gh release create latest-build --prerelease --title "Latest build" --notes $notes --target ${{ github.sha }} `
+            dist/Opacbar-Windows-Portable.zip dist/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Creating the Latest build release failed" }
 
       - name: Publish GitHub Release (on version tags)
         if: startsWith(github.ref, 'refs/tags/v')
