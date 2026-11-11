@@ -1,15 +1,20 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
 using System.Reflection;
 using System.Runtime.InteropServices;
+using OpacityBar;
 
-[assembly: AssemblyTitle("Opacbar")]
-[assembly: AssemblyDescription("Opacbar: a small, monochrome taskbar customizer for Windows")]
+[assembly: AssemblyTitle(AppInfo.Name)]
+[assembly: AssemblyDescription("OpacityBar: a small taskbar customizer for Windows")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("Opacbar contributors")]
-[assembly: AssemblyProduct("Opacbar")]
-[assembly: AssemblyCopyright("Copyright (c) 2026 Opacbar contributors (MIT License)")]
-[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCompany(AppInfo.Publisher)]
+[assembly: AssemblyProduct(AppInfo.Name)]
+[assembly: AssemblyCopyright("Copyright (c) 2026 moller.studio (MIT License)")]
+[assembly: AssemblyTrademark("The OpacityBar name and logo belong to moller.studio")]
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
-// Keep in sync with AppVersion in installer/Opacbar.iss.
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+// The version lives in AppInfo.Version (src/AppInfo.cs).
+[assembly: AssemblyVersion(AppInfo.Version)]
+[assembly: AssemblyFileVersion(AppInfo.Version)]

@@ -1,11 +1,16 @@
-name: Build Opacbar
+name: Build
+
+# Every push and pull request: build the helper DLLs (x64 + ARM64), OpacityBar.exe and
+# OpacityBarSetup.exe, and keep them as a short-lived run artifact.
+# A version tag (v1.2.3) additionally publishes a GitHub Release with the installer, a
+# portable zip and checksums. The tag must match AppInfo.Version in src/AppInfo.cs.
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -15,18 +20,26 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # One job builds everything: the native helper (native/OpacbarTAP.cpp) for x64
-  # and ARM64 with MSVC, and Opacbar.exe with the built-in .NET Framework csc.
-  # No intermediate artifacts, so the private-repo artifact quota is barely used.
-  # ---------------------------------------------------------------------------
   build:
-    name: Build and package Opacbar
+    name: Build and package
     runs-on: windows-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Check out
         uses: actions/checkout@v6
+
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $m = Select-String -Path src/AppInfo.cs -Pattern 'const string Version = "([0-9]+\.[0-9]+\.[0-9]+)"'
+          if (-not $m) { throw "AppInfo.Version not found in src/AppInfo.cs" }
+          $v = $m.Matches[0].Groups[1].Value
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$v") {
+            throw "Tag ${{ github.ref_name }} does not match AppInfo.Version $v. Bump src/AppInfo.cs (and CHANGELOG.md) first."
+          }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "OpacityBar $v"
 
       - name: Compile helper DLLs (x64 + ARM64)
         shell: pwsh
@@ -43,100 +56,76 @@ jobs:
           foreach ($t in $targets) {
             $obj = "obj_$($t.arch)"
             New-Item -ItemType Directory -Force $obj | Out-Null
-            $dll = "dist\OpacbarTAP.$($t.arch).dll"
-            # C++/WinRT (blur brush) comes from the Windows SDK (include\<ver>\cppwinrt, on the
-            # vcvars INCLUDE path). Explicit system libs first, windowsapp.lib last so it only
-            # supplies the WinRT core imports; dxguid.lib = D2D1 effect CLSIDs (static data).
+            $dll = "dist\OpacityBarTAP.$($t.arch).dll"
+            # C++/WinRT (blur brush) comes from the Windows SDK. windowsapp.lib last so it only supplies
+            # the WinRT core imports; dxguid.lib = D2D1 effect CLSIDs.
             $cmd = "`"$vcvars`" $($t.vc) >nul && " +
                    "cl /nologo /LD /O2 /std:c++20 /EHsc /permissive- /bigobj /GS /guard:cf /W4 /DUNICODE /D_UNICODE " +
-                   "/Fo$obj\ native\OpacbarTAP.cpp /Fe:$dll " +
-                   "/link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT " +
+                   "/Fo$obj\ native\OpacityBarTAP.cpp /Fe:$dll " +
+                   "/link /DEF:native\OpacityBarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT " +
                    "kernel32.lib ole32.lib oleaut32.lib user32.lib dxguid.lib windowsapp.lib && " +
                    "dumpbin /nologo /headers $dll > $obj\headers.txt && " +
                    "dumpbin /nologo /exports $dll > $obj\exports.txt"
             cmd /c $cmd
             if ($LASTEXITCODE -ne 0) { throw "Building $dll failed (exit $LASTEXITCODE)" }
 
-            # Sanity checks: correct machine type and exactly the two expected exports.
             $headers = Get-Content "$obj\headers.txt" -Raw
             if ($headers -notmatch "$($t.machine) machine") { Write-Host $headers; throw "Unexpected machine type for $dll" }
             $exports = Get-Content "$obj\exports.txt" -Raw
-            Write-Host $exports
             foreach ($e in 'DllGetClassObject', 'DllCanUnloadNow') {
               if ($exports -notmatch "\b$e\b") { throw "Missing export $e in $dll" }
             }
           }
 
-      - name: Compile Opacbar.exe
+      - name: Compile OpacityBar.exe and OpacityBarSetup.exe
         shell: pwsh
         run: |
           ./build.ps1
-          if (-not (Test-Path "dist/Opacbar.exe")) { throw "dist/Opacbar.exe was not generated!" }
+          foreach ($f in "OpacityBar.exe", "OpacityBarSetup.exe") {
+            if (-not (Test-Path "dist/$f")) { throw "dist/$f was not generated!" }
+          }
 
-      - name: Build installer (Inno Setup)
+      - name: Package
         shell: pwsh
         run: |
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-            choco install innosetup -y --no-progress
-            if ($LASTEXITCODE -ne 0) { throw "Installing Inno Setup failed" }
+          $v = "${{ steps.version.outputs.version }}"
+          New-Item -ItemType Directory -Force release, portable | Out-Null
+          Copy-Item dist/OpacityBarSetup.exe "release/OpacityBar-$v-Setup.exe"
+          Copy-Item dist/OpacityBar.exe, dist/OpacityBarTAP.x64.dll, dist/OpacityBarTAP.arm64.dll, LICENSE portable/
+          Compress-Archive -Force -Path portable/* -DestinationPath "release/OpacityBar-$v-Portable.zip"
+          $lines = Get-ChildItem release -File | Sort-Object Name | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
           }
-          & $iscc /Q installer\Opacbar.iss
-          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
-          if (-not (Test-Path "dist/OpacbarSetup.exe")) { throw "dist/OpacbarSetup.exe was not generated!" }
+          $lines | Out-File -FilePath release/SHA256SUMS.txt -Encoding utf8
+          Get-Content release/SHA256SUMS.txt
 
-      - name: Checksums and portable ZIP
-        shell: pwsh
-        run: |
-          $files = "OpacbarSetup.exe", "Opacbar.exe", "OpacbarTAP.x64.dll", "OpacbarTAP.arm64.dll"
-          foreach ($f in $files) {
-            if (-not (Test-Path "dist/$f")) { throw "dist/$f is missing!" }
-          }
-          $lines = foreach ($f in $files) {
-            "{0}  {1}" -f (Get-FileHash "dist/$f" -Algorithm SHA256).Hash.ToLowerInvariant(), $f
-          }
-          $lines | Out-File -FilePath "dist/SHA256SUMS.txt" -Encoding utf8
-          Get-Content "dist/SHA256SUMS.txt"
-
-          Copy-Item "README.md" -Destination "dist/README.md"
-          Copy-Item "LICENSE" -Destination "dist/LICENSE"
-          Compress-Archive -Force -DestinationPath "dist/Opacbar-Windows-Portable.zip" -Path `
-            "dist/Opacbar.exe", "dist/OpacbarTAP.x64.dll", "dist/OpacbarTAP.arm64.dll", `
-            "dist/SHA256SUMS.txt", "dist/README.md", "dist/LICENSE"
-
-      # Short-lived copy on the run page. Never fails the build if the storage quota is full.
-      - name: Upload Build Artifact
+      # Short-lived copy on the run page for testing. Never fails the build if storage is full.
+      - name: Upload build
         uses: actions/upload-artifact@v6
         continue-on-error: true
         with:
-          name: Opacbar-Windows
-          path: dist/Opacbar-Windows-Portable.zip
-          retention-days: 3
+          name: OpacityBar-${{ steps.version.outputs.version }}-build
+          path: release/
+          retention-days: 7
           if-no-files-found: error
 
-      # Rolling "Latest build" pre-release, updated on every push to main. Release assets do
-      # not count against the Actions artifact quota. Find it under Releases on the repo page.
-      - name: Update "Latest build" pre-release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+      - name: Publish release
+        if: github.ref_type == 'tag'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Automatic build of commit ${{ github.sha }}. Recommended: run OpacbarSetup.exe (installs for your account, no admin). Portable: unzip Opacbar-Windows-Portable.zip and run Opacbar.exe."
-          gh release delete latest-build --yes --cleanup-tag 2>$null
-          gh release create latest-build --prerelease --title "Latest build" --notes $notes --target ${{ github.sha }} `
-            dist/OpacbarSetup.exe dist/Opacbar-Windows-Portable.zip dist/SHA256SUMS.txt
-          if ($LASTEXITCODE -ne 0) { throw "Creating the Latest build release failed" }
+          $v = "${{ steps.version.outputs.version }}"
+          # Release notes = this version's section of CHANGELOG.md.
+          $log = Get-Content CHANGELOG.md -Raw
+          $m = [regex]::Match($log, "(?ms)^## \[$([regex]::Escape($v))\][^\n]*\n(.*?)(?=^## \[|\z)")
+          $body = if ($m.Success) { $m.Groups[1].Value.Trim() } else { "See CHANGELOG.md." }
+          $body += "`n`n### Download`n`n- **OpacityBar-$v-Setup.exe**: recommended. Installs for your account only (no admin rights), updates an existing install.`n- **OpacityBar-$v-Portable.zip**: unzip anywhere and run OpacityBar.exe.`n- **SHA256SUMS.txt**: checksums.`n`nWindows SmartScreen may warn because the files are not code-signed yet: choose *More info > Run anyway*."
+          $body | Out-File -FilePath notes.md -Encoding utf8
 
-      - name: Publish GitHub Release (on version tags)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            dist/OpacbarSetup.exe
-            dist/Opacbar.exe
-            dist/OpacbarTAP.x64.dll
-            dist/OpacbarTAP.arm64.dll
-            dist/Opacbar-Windows-Portable.zip
-            dist/SHA256SUMS.txt
-          generate_release_notes: true
+          # The old rolling "Latest build" pre-release is replaced by versioned releases.
+          gh release delete latest-build --yes --cleanup-tag 2>$null
+
+          gh release create "${{ github.ref_name }}" --title "OpacityBar $v" --notes-file notes.md --verify-tag `
+            "release/OpacityBar-$v-Setup.exe" "release/OpacityBar-$v-Portable.zip" release/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Creating the release failed" }

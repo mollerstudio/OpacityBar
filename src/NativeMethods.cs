@@ -1,7 +1,11 @@
-﻿using System;
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
+using System;
 using System.Runtime.InteropServices;
 
-namespace Opacbar
+namespace OpacityBar
 {
     public static class NativeMethods
     {

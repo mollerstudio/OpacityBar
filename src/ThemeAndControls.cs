@@ -1,4 +1,8 @@
-﻿using System;
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -8,7 +12,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace Opacbar
+namespace OpacityBar
 {
     // ------------------------------------------------------------------------------------
     // Private native helpers (kept here so they never collide with NativeMethods.cs)
@@ -988,51 +992,107 @@ namespace Opacbar
             if (!Primary)
                 Gfx.StrokeRound(g, Ink(Theme.Border), r, Theme.PxF(Theme.RadiusControl), Math.Max(1f, Theme.PxF(1f)));
             Color fore = Primary ? Theme.Surface : Ink(Danger ? Theme.Error : Theme.Text);
-            Gfx.Text(g, Caption, Theme.Body, new Rectangle(0, 0, Width, Height), fore, fill,
+            Gfx.Text(g, Caption, Primary ? Theme.BodyBold : Theme.Body, new Rectangle(0, 0, Width, Height), fore, fill,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             FocusRing(g, r, Theme.PxF(Theme.RadiusControl));
         }
     }
 
     // ------------------------------------------------------------------------------------
-    // Header: title, status line with dot, master toggle. The title area drags the window.
+    // Header: title plus one icon button. Main page: "OpacityBar" + gear (opens Settings).
+    // Settings page: back arrow + "Settings". The rest of the header drags the window.
     // ------------------------------------------------------------------------------------
     public class HeaderBar : FlyoutControl
     {
-        private readonly ToggleSwitch _toggle = new ToggleSwitch();
-        private string _status = "";
-        private Color _statusColor = Theme.TextSecondary;
+        private const string GlyphGear = "";
+        private const string GlyphBack = "";
+        private static string _iconFamily;
+
+        private bool _settingsMode;
+        private bool _hover, _down;
         public event EventHandler DragRequested;
+        public event EventHandler IconClicked;
 
         public HeaderBar()
         {
-            Controls.Add(_toggle);
+            Cursor = Cursors.Default;
         }
 
-        public ToggleSwitch Toggle { get { return _toggle; } }
-
-        public void SetStatus(string text, Color dot)
+        /// <summary>False: "OpacityBar" + gear. True: back arrow + "Settings".</summary>
+        public bool SettingsMode
         {
-            _status = text;
-            _statusColor = dot;
+            get { return _settingsMode; }
+            set { _settingsMode = value; Invalidate(); }
+        }
+
+        public override int GetPreferredHeight(int width) { return Theme.Px(36); }
+
+        private static string IconFamily
+        {
+            get
+            {
+                if (_iconFamily == null)
+                {
+                    _iconFamily = "Segoe MDL2 Assets";
+                    try
+                    {
+                        using (InstalledFontCollection c = new InstalledFontCollection())
+                            foreach (FontFamily f in c.Families)
+                                if (f.Name == "Segoe Fluent Icons") { _iconFamily = f.Name; break; }
+                    }
+                    catch { }
+                }
+                return _iconFamily;
+            }
+        }
+
+        private Rectangle IconRect
+        {
+            get
+            {
+                int s = Theme.Px(32);
+                int y = (Height - s) / 2;
+                return _settingsMode ? new Rectangle(-Theme.Px(6), y, s, s) : new Rectangle(Width - s + Theme.Px(6), y, s, s);
+            }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            bool h = IconRect.Contains(e.Location);
+            if (h != _hover) { _hover = h; Cursor = h ? Cursors.Hand : Cursors.Default; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            _hover = false; _down = false;
             Invalidate();
-        }
-
-        public override int GetPreferredHeight(int width) { return Theme.Px(44); }
-
-        protected override void OnLayout(LayoutEventArgs e)
-        {
-            base.OnLayout(e);
-            int w = _toggle.PreferredWidth, h = _toggle.GetPreferredHeight(w);
-            _toggle.SetBounds(Width - w, (Height - h) / 2, w, h);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
-            if (e.Button == MouseButtons.Left)
+            if (e.Button != MouseButtons.Left) return;
+            if (IconRect.Contains(e.Location))
             {
-                EventHandler h = DragRequested;
+                _down = true;
+                Invalidate();
+                return;
+            }
+            EventHandler h = DragRequested;
+            if (h != null) h(this, EventArgs.Empty);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            bool click = _down && IconRect.Contains(e.Location);
+            _down = false;
+            Invalidate();
+            if (click)
+            {
+                EventHandler h = IconClicked;
                 if (h != null) h(this, EventArgs.Empty);
             }
         }
@@ -1041,15 +1101,17 @@ namespace Opacbar
         {
             Graphics g = e.Graphics;
             Smooth(g);
-            int titleH = Theme.Px(24);
-            Gfx.Text(g, "Opacbar", Theme.Title, new Rectangle(0, 0, Width, titleH), Theme.Text, Theme.Surface,
-                TextFormatFlags.VerticalCenter);
-            int dotX = Theme.Px(4);
-            int lineH = Theme.Px(16);
-            int y = Height - lineH;
-            Gfx.FillCircle(g, _statusColor, dotX, y + lineH / 2f, Theme.PxF(8));
-            Gfx.Text(g, _status, Theme.Caption, new Rectangle(Theme.Px(16), y, Math.Max(0, Width - _toggle.Width - Theme.Px(24)), lineH),
-                Theme.TextSecondary, Theme.Surface, TextFormatFlags.VerticalCenter);
+            Rectangle ir = IconRect;
+            if (_hover || _down)
+                Gfx.FillRound(g, _down ? Theme.Hover : Theme.Raised, ir, Theme.PxF(Theme.RadiusControl));
+            using (Font icon = new Font(IconFamily, Theme.PxF(16), FontStyle.Regular, GraphicsUnit.Pixel))
+                Gfx.Text(g, _settingsMode ? GlyphBack : GlyphGear, icon, ir, Theme.Text, (_hover || _down) ? (_down ? Theme.Hover : Theme.Raised) : Theme.Surface,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+            int titleX = _settingsMode ? ir.Right + Theme.Px(4) : 0;
+            Gfx.Text(g, _settingsMode ? "Settings" : AppInfo.Name, Theme.Title,
+                new Rectangle(titleX, 0, Math.Max(0, Width - titleX - Theme.Px(36)), Height),
+                Theme.Text, Theme.Surface, TextFormatFlags.VerticalCenter);
         }
     }
 
@@ -1096,10 +1158,26 @@ namespace Opacbar
             return "#" + c.R.ToString("X2") + c.G.ToString("X2") + c.B.ToString("X2");
         }
 
+        /// <summary>"#RRGGBB" or "RRGGBB" to 0xRRGGBB.</summary>
+        public static bool TryParseHex(string s, out int rgb)
+        {
+            rgb = 0;
+            if (string.IsNullOrEmpty(s)) return false;
+            if (s[0] == '#') s = s.Substring(1);
+            if (s.Length != 6) return false;
+            for (int i = 0; i < 6; i++)
+            {
+                char ch = s[i];
+                bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+                if (!ok) return false;
+            }
+            return int.TryParse(s, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out rgb);
+        }
+
         public static bool TryParse(string s, out Color c)
         {
             int rgb;
-            if (TaskbarStyle.TryParseHex(s, out rgb))
+            if (TryParseHex(s, out rgb))
             {
                 c = Color.FromArgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
                 return true;
@@ -1313,7 +1391,7 @@ namespace Opacbar
             x += Theme.Px(10);
             if (Recents != null)
             {
-                for (int i = 0; i < Recents.Count && i < AppConfig.MaxRecentColors; i++)
+                for (int i = 0; i < Recents.Count && i < 6; i++)   // 6 = AppConfig.MaxRecentColors
                 {
                     Color c;
                     if (!ColorMath.TryParse(Recents[i], out c)) continue;
@@ -1690,14 +1768,73 @@ namespace Opacbar
     }
 
     // ------------------------------------------------------------------------------------
-    // Tray icon: crisp monochrome pill glyph generated at the real icon size
+    // Tray icon: the logo embedded by the build (assets/tray-black.ico on light taskbars,
+    // assets/tray-white.ico on dark ones). Black is the fallback whenever the right one is missing;
+    // a drawn glyph is the last resort. Normal style shows the icon dimmed.
     // ------------------------------------------------------------------------------------
     public static class IconFactory
     {
-        public static Icon CreateTrayIcon(bool enabled)
+        public static Icon CreateTrayIcon(bool active, bool lightTaskbar)
         {
             int size = Math.Max(16, SystemInformation.SmallIconSize.Width);
-            Color ink = Theme.SystemTaskbarLight() ? Color.FromArgb(0x11, 0x11, 0x11) : Color.White;
+            Icon custom = lightTaskbar ? null : LoadEmbedded("tray-white.ico", size);
+            if (custom == null) custom = LoadEmbedded("tray-black.ico", size);
+            if (custom != null)
+            {
+                if (active) return custom;
+                using (custom) return Dim(custom, size);
+            }
+            return DrawGlyph(active, lightTaskbar, size);
+        }
+
+        /// <summary>An icon resource embedded by build.ps1 (assets/*.ico), at the requested size, or null.</summary>
+        public static Icon LoadEmbedded(string name, int size)
+        {
+            try
+            {
+                using (System.IO.Stream s = typeof(IconFactory).Assembly.GetManifestResourceStream(name))
+                {
+                    if (s == null) return null;
+                    return new Icon(s, size, size);
+                }
+            }
+            catch { return null; }
+        }
+
+        private static Icon Dim(Icon src, int size)
+        {
+            using (Bitmap bmp = src.ToBitmap())
+            using (Bitmap outBmp = new Bitmap(size, size, PixelFormat.Format32bppArgb))
+            {
+                using (Graphics g = Graphics.FromImage(outBmp))
+                using (ImageAttributes ia = new ImageAttributes())
+                {
+                    ColorMatrix cm = new ColorMatrix();
+                    cm.Matrix33 = 0.45f;
+                    ia.SetColorMatrix(cm);
+                    g.DrawImage(bmp, new Rectangle(0, 0, size, size), 0, 0, bmp.Width, bmp.Height, GraphicsUnit.Pixel, ia);
+                }
+                return ToIcon(outBmp);
+            }
+        }
+
+        private static Icon ToIcon(Bitmap bmp)
+        {
+            IntPtr h = bmp.GetHicon();
+            try
+            {
+                using (Icon tmp = Icon.FromHandle(h))
+                    return (Icon)tmp.Clone();
+            }
+            finally
+            {
+                NativeMethods.DestroyIcon(h);
+            }
+        }
+
+        private static Icon DrawGlyph(bool enabled, bool lightTaskbar, int size)
+        {
+            Color ink = lightTaskbar ? Color.FromArgb(0x11, 0x11, 0x11) : Color.White;
             using (Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb))
             {
                 using (Graphics g = Graphics.FromImage(bmp))
@@ -1722,16 +1859,7 @@ namespace Opacbar
                         Gfx.FillRound(g, c, fill, fh / 2f);
                     }
                 }
-                IntPtr h2 = bmp.GetHicon();
-                try
-                {
-                    using (Icon tmp = Icon.FromHandle(h2))
-                        return (Icon)tmp.Clone();
-                }
-                finally
-                {
-                    NativeMethods.DestroyIcon(h2);
-                }
+                return ToIcon(bmp);
             }
         }
     }

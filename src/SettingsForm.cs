@@ -1,13 +1,18 @@
-﻿using System;
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace Opacbar
+namespace OpacityBar
 {
     /// <summary>
-    /// The Opacbar flyout: a small, borderless window anchored above the tray.
+    /// The OpacityBar flyout: a small, borderless window anchored above the tray. Main page: the look.
+    /// The gear in the header switches to the Settings page (startup, theme, reset, quit).
     /// One scale factor (window DPI / 96) drives every size and font.
     /// </summary>
     public class SettingsForm : Form
@@ -16,7 +21,7 @@ namespace Opacbar
         private const int CS_DROPSHADOW = 0x00020000;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
 
-        private static readonly Material[] Styles = new Material[] { Material.Clear, Material.Color, Material.Blur };
+        private static readonly Material[] Styles = new Material[] { Material.Normal, Material.Clear, Material.Color, Material.Blur };
 
         private readonly AppConfig _config;
         private readonly TaskbarEngine _engine;
@@ -34,7 +39,7 @@ namespace Opacbar
         private HeaderBar _header;
         private TextBlock _note;
         private FlatButton _restartBtn;
-        private SegmentedControl _tabs;
+        private bool _settingsPage;
         private StackPanel _pageLook, _pageGeneral;
 
         // Look
@@ -43,7 +48,7 @@ namespace Opacbar
         private ColorPickerPanel _picker;
         private LabeledSlider _opacity;
         private LabeledSlider _blurAmount;
-        private TextBlock _hint;
+        private TextBlock _hint, _normalHint;
         private Row _topLine;
 
         // General
@@ -70,7 +75,7 @@ namespace Opacbar
             StartPosition = FormStartPosition.Manual;
             KeyPreview = true;
             DoubleBuffered = true;
-            Text = "Opacbar";
+            Text = AppInfo.Name;
             BackColor = Theme.Surface;
 
             _statusTimer.Interval = 1000;
@@ -104,12 +109,7 @@ namespace Opacbar
 
             _header = new HeaderBar();
             _header.DragRequested += delegate { BeginDrag(); };
-            _header.Toggle.CheckedChanged += delegate
-            {
-                if (_syncing) return;
-                _config.Enabled = _header.Toggle.Checked;
-                Commit();
-            };
+            _header.IconClicked += delegate { SetPage(!_settingsPage); };
 
             _note = new TextBlock("") { Visible = false };
 
@@ -121,21 +121,12 @@ namespace Opacbar
                 _engine.RestartExplorer();
             };
 
-            _tabs = new SegmentedControl("Look", "General");
-            _tabs.SelectedIndex = 0;
-            _tabs.SelectedIndexChanged += delegate
-            {
-                ShowPage();
-                Relayout();
-            };
-
             _pageLook = BuildLookPage();
             _pageGeneral = BuildGeneralPage();
 
             _root.Controls.Add(_header);
             _root.Controls.Add(_note);
             _root.Controls.Add(_restartBtn);
-            _root.Controls.Add(_tabs);
             _root.Controls.Add(_pageLook);
             _root.Controls.Add(_pageGeneral);
             Controls.Add(_root);
@@ -151,14 +142,14 @@ namespace Opacbar
         {
             StackPanel p = NewPage();
 
-            _style = new SegmentedControl("Clear", "Color", "Blur");
+            _style = new SegmentedControl("Normal", "Clear", "Color", "Blur");
             _style.SelectedIndexChanged += delegate
             {
                 if (_syncing) return;
                 int i = _style.SelectedIndex;
                 if (i < 0 || i >= Styles.Length) return;
                 Look.Material = Styles[i];
-                if (Look.Material != Material.Clear && Look.Opacity < 10)
+                if ((Look.Material == Material.Color || Look.Material == Material.Blur) && Look.Opacity < 10)
                 {
                     // Coming from Clear: start at a visible opacity instead of an invisible one.
                     Look.Opacity = 60;
@@ -223,8 +214,11 @@ namespace Opacbar
                 Commit();
             };
 
+            _normalHint = new TextBlock("The standard Windows taskbar.") { Visible = false };
+
             p.Controls.Add(new SectionHeader("Style"));
             p.Controls.Add(_style);
+            p.Controls.Add(_normalHint);
             p.Controls.Add(_colorRow);
             p.Controls.Add(_picker);
             p.Controls.Add(_blurAmount);
@@ -260,13 +254,10 @@ namespace Opacbar
                 Commit();
             };
 
-            FlatButton open = new FlatButton("Open settings file");
-            open.Click += delegate { OpenSettingsFile(); };
-
             FlatButton reset = new FlatButton("Reset to defaults");
             reset.Click += delegate { ResetDefaults(); };
 
-            FlatButton quit = new FlatButton("Quit and restore taskbar");
+            FlatButton quit = new FlatButton("Quit " + AppInfo.Name);
             quit.Danger = true;
             quit.Click += delegate
             {
@@ -274,14 +265,12 @@ namespace Opacbar
                 if (h != null) h(this, EventArgs.Empty);
             };
 
-            TextBlock footer = new TextBlock("Open source · no network · no admin\nEmergency quit: Ctrl+Shift+Alt+Q");
+            TextBlock footer = new TextBlock(AppInfo.Name + " " + AppInfo.Version + " by " + AppInfo.Publisher + " · open source\nNo network, no tracking. Emergency quit: Ctrl+Shift+Alt+Q");
             footer.Small = true;
             footer.Center = true;
 
             p.Controls.Add(_startup);
             p.Controls.Add(themeRow);
-            p.Controls.Add(new SectionHeader("Settings"));
-            p.Controls.Add(open);
             p.Controls.Add(reset);
             if (Diagnostics.Enabled)
             {
@@ -299,8 +288,16 @@ namespace Opacbar
 
         private void ShowPage()
         {
-            _pageLook.Visible = _tabs.SelectedIndex == 0;
-            _pageGeneral.Visible = _tabs.SelectedIndex == 1;
+            _header.SettingsMode = _settingsPage;
+            _pageLook.Visible = !_settingsPage;
+            _pageGeneral.Visible = _settingsPage;
+        }
+
+        private void SetPage(bool settings)
+        {
+            _settingsPage = settings;
+            ShowPage();
+            if (IsHandleCreated) Relayout();
         }
 
         private void AddRecentColor(string hex)
@@ -343,7 +340,6 @@ namespace Opacbar
             _syncing = true;
             try
             {
-                _header.Toggle.Checked = _config.Enabled;
                 _style.SelectedIndex = Array.IndexOf(Styles, Look.Material);
                 _opacity.Value = Look.Opacity;
                 _blurAmount.Value = Look.BlurAmount;
@@ -366,9 +362,12 @@ namespace Opacbar
 
         private void UpdateVisibility()
         {
+            bool normal = Look.Material == Material.Normal;
             bool blur = Look.Material == Material.Blur;
-            bool colored = Look.Material != Material.Clear;   // Blur: color + tint color the blur
+            bool colored = Look.Material == Material.Color || blur;   // Blur: color + tint color the blur
 
+            _normalHint.Visible = normal;
+            _topLine.Visible = !normal;
             _colorRow.Visible = colored;
             _colorRow.Expanded = _pickerOpen;
             _picker.Visible = colored && _pickerOpen;
@@ -418,61 +417,29 @@ namespace Opacbar
         {
             if (IsDisposed) return;
 
-            string text = "Active";
-            Color dot = Theme.Success;
+            // No status line when everything works: a note appears only when something needs attention.
             string note = null;
             Color noteColor = Theme.Warning;
-
             EngineHealth health = _engine.Health;
-            if (!_config.Enabled)
+            string detail = _engine.HealthDetail;
+            switch (health)
             {
-                text = "Off";
-                dot = Theme.TextDisabled;
-            }
-            else
-            {
-                switch (health)
-                {
-                    case EngineHealth.Paused:
-                        text = "Paused";
-                        dot = Theme.TextSecondary;
-                        break;
-                    case EngineHealth.NoTaskbar:
-                        text = "No taskbar found";
-                        dot = Theme.Warning;
-                        note = _engine.HealthDetail;
-                        break;
-                    case EngineHealth.HelperMissing:
-                        text = "Helper missing";
-                        dot = Theme.Warning;
-                        note = _engine.HealthDetail;
-                        break;
-                    case EngineHealth.Connecting:
-                        text = "Connecting to the taskbar...";
-                        dot = Theme.Warning;
-                        note = _engine.HealthDetail;
-                        break;
-                    case EngineHealth.HelperOutdated:
-                        text = "One quick restart needed";
-                        dot = Theme.Warning;
-                        note = _engine.HealthDetail;
-                        break;
-                    case EngineHealth.HelperFailed:
-                        text = "Helper failed";
-                        dot = Theme.Error;
-                        noteColor = Theme.Error;
-                        note = _engine.HealthDetail;
-                        break;
-                    default:
-                        int n = _engine.ActiveTaskbarCount;
-                        if (n > 1) text += " · " + n + " taskbars";
-                        break;
-                }
+                case EngineHealth.NoTaskbar:
+                case EngineHealth.HelperMissing:
+                case EngineHealth.HelperOutdated:
+                    note = detail;
+                    break;
+                case EngineHealth.Connecting:
+                    note = string.IsNullOrEmpty(detail) ? "Connecting to the taskbar..." : detail;
+                    noteColor = Theme.TextSecondary;
+                    break;
+                case EngineHealth.HelperFailed:
+                    note = string.IsNullOrEmpty(detail) ? "The taskbar helper stopped working." : detail;
+                    noteColor = Theme.Error;
+                    break;
             }
 
-            _header.SetStatus(text, dot);
-
-            bool showRestart = _config.Enabled && health == EngineHealth.HelperOutdated;
+            bool showRestart = health == EngineHealth.HelperOutdated;
             bool restartChanged = _restartBtn.WantVisible != showRestart;
             _restartBtn.Visible = showRestart;
             _restartBtn.Enabled = (DateTime.UtcNow - _restartClickedUtc).TotalSeconds > 8;
@@ -529,6 +496,8 @@ namespace Opacbar
             Theme.SetDpi(dpi);
             Theme.Apply(_config.UiTheme);
             BackColor = Theme.Surface;
+            _settingsPage = false;   // always open on the look
+            ShowPage();
             SyncControlsFromConfig();
             PlaceAboveTray();
 
@@ -581,7 +550,8 @@ namespace Opacbar
         {
             if (keyData == Keys.Escape)
             {
-                HideFlyout();
+                if (_settingsPage) SetPage(false);
+                else HideFlyout();
                 return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
@@ -636,21 +606,6 @@ namespace Opacbar
 
         // ---- General actions --------------------------------------------------------
 
-        private void OpenSettingsFile()
-        {
-            _saver.Flush();
-            string path = AppConfig.GetConfigPath();
-            _suppressHide = true;
-            try
-            {
-                try { Process.Start(path); }
-                catch { Process.Start("notepad.exe", "\"" + path + "\""); }
-            }
-            catch { }
-            _suppressHide = false;
-            HideFlyout();
-        }
-
         private void SaveTaskbarMap()
         {
             string path, err;
@@ -672,7 +627,7 @@ namespace Opacbar
             DialogResult r;
             try
             {
-                r = MessageBox.Show(this, "Reset all settings to their defaults?", "Opacbar",
+                r = MessageBox.Show(this, "Reset all settings to their defaults?", AppInfo.Name,
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
             }
             finally

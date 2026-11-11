@@ -1,0 +1,9 @@
+; SPDX-License-Identifier: MIT
+; Copyright (c) 2026 moller.studio
+; OpacityBar: https://github.com/mollerstudio/OpacityBar
+
+; Exports for OpacityBarTAP.<arch>.dll - the only two entry points the XAML Diagnostics
+; loader (InitializeXamlDiagnosticsEx) needs to create our TAP object.
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow   PRIVATE

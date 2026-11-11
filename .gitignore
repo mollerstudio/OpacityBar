@@ -1,11 +1,22 @@
-# Build outputs (remove dist/ from .gitignore if you want to commit the prebuilt .exe)
+# Build output
+dist/
+release/
+portable/
 bin/
 obj/
-dist/
+obj_*/
+native/bin/
+*.obj
+*.pdb
+
+# IDE
+.vs/
+.vscode/
 *.user
 *.suo
-.vs/
 
-# Runtime user config in local test directory
-opacbar.config.json
-.write_test
+# Local runtime files
+settings.json
+portable
+diagnostics
+*.log

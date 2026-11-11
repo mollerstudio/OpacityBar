@@ -1,4 +1,8 @@
-﻿using System;
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -9,7 +13,7 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace Opacbar
+namespace OpacityBar
 {
     public enum TapStatus
     {
@@ -57,7 +61,7 @@ namespace Opacbar
     }
 
     /// <summary>
-    /// Loads OpacbarTAP.&lt;arch&gt;.dll into explorer.exe through the XAML Diagnostics API and talks to it
+    /// Loads OpacityBarTAP.&lt;arch&gt;.dll into explorer.exe through the XAML Diagnostics API and talks to it
     /// through its message-only "OpacbarTAP.Sink" windows (see native/PROTOCOL.md).
     /// Rules that were hard to find (verified on Windows 11 ARM64 build 26300):
     ///   - Windows accepts only ONE injection per Explorer process; later InitializeXamlDiagnosticsEx calls
@@ -65,7 +69,7 @@ namespace Opacbar
     ///     older helper means Explorer has to restart.
     ///   - 0x80070490 right after Explorer starts means the taskbar is still starting: retry in ~1 s.
     ///   - A process can also inject only once in its lifetime, so each attempt runs in a short-lived
-    ///     "Opacbar.exe --inject" child process (Program.Main, RunInjectorProcess).
+    ///     "OpacityBar.exe --inject" child process (Program.Main, RunInjectorProcess).
     ///   - The endpoint name must be exactly "VisualDiagConnection1".
     /// </summary>
     public sealed class TapHelper
@@ -76,9 +80,10 @@ namespace Opacbar
         private const uint WM_TAP_DUMP = WM_APP + 0x14;
         private const uint WM_TAP_VERSION = WM_APP + 0x15;
         private const uint WM_TAP_STATS = WM_APP + 0x16;
+        private const uint WM_TAP_UNLOAD = WM_APP + 0x17;
         private const int PING_REPLY = 0x0BAC;
 
-        // Must equal OPAC_PROTOCOL_VERSION in native/OpacbarTAP.cpp. An older helper found in Explorer
+        // Must equal OPAC_PROTOCOL_VERSION in native/OpacityBarTAP.cpp. An older helper found in Explorer
         // triggers an automatic (rate-limited) Explorer restart.
         private const int ProtocolVersion = 6;
 
@@ -87,7 +92,7 @@ namespace Opacbar
         private const long SendMinIntervalMs = 33; // ~30 sends/s while dragging
         private const string SinkClass = "OpacbarTAP.Sink";
         private const string Endpoint = "VisualDiagConnection1";
-        private const string OutdatedDetail = "Opacbar was updated, but Windows is still running the old version inside the taskbar. Restart Explorer once to load the new one; your taskbar disappears for a second and comes back.";
+        private const string OutdatedDetail = "OpacityBar was updated, but Windows is still running the old version inside the taskbar. Restart Explorer once to load the new one; your taskbar disappears for a second and comes back.";
         private static readonly Guid TapClsid = new Guid("6C3B1F0A-3D52-4E8B-9A41-0B5C2E7D9F11");
         private static readonly Stopwatch Clock = Stopwatch.StartNew();
 
@@ -148,53 +153,20 @@ namespace Opacbar
         }
 
         /// <summary>
-        /// Copies the helper to %LOCALAPPDATA%\Opacbar\helper under a content-hash name, so the file next to
-        /// the exe is never locked by Explorer and a new version always gets a new name.
+        /// The helper DLL next to OpacityBar.exe (normally %LOCALAPPDATA%\Programs\OpacityBar). It is loaded
+        /// from there directly: verified on Windows 11 26300 that Explorer reliably loads it from the install
+        /// folder, while copies in other folders were sometimes ignored. While Explorer has it loaded the
+        /// file is locked; the installer renames it aside on update, and uninstall cleans up at next sign-in.
         /// </summary>
         private string PrepareDll()
         {
             if (_preparedDll != null && File.Exists(_preparedDll)) return _preparedDll;
             string arch = ArchName();
             if (arch == null) return null;
-
-            string src = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "OpacbarTAP." + arch + ".dll");
+            string src = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, AppInfo.HelperPrefix + arch + ".dll");
             if (!File.Exists(src)) return null;
-
-            string hash;
-            using (SHA256 sha = SHA256.Create())
-            using (FileStream fs = new FileStream(src, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            {
-                byte[] h = sha.ComputeHash(fs);
-                StringBuilder sb = new StringBuilder();
-                for (int i = 0; i < 6; i++) sb.Append(h[i].ToString("x2"));
-                hash = sb.ToString();
-            }
-
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Opacbar", "helper");
-            Directory.CreateDirectory(dir);
-            string dst = Path.Combine(dir, "OpacbarTAP." + arch + "." + hash + ".dll");
-            try
-            {
-                // Remove older copies; the one Explorer has loaded is locked and simply stays.
-                foreach (string old in Directory.GetFiles(dir, "OpacbarTAP." + arch + ".*.dll"))
-                {
-                    if (!string.Equals(old, dst, StringComparison.OrdinalIgnoreCase)) { try { File.Delete(old); } catch { } }
-                }
-            }
-            catch { }
-            if (!File.Exists(dst))
-            {
-                string tmp = dst + "." + Process.GetCurrentProcess().Id + ".tmp";
-                File.Copy(src, tmp, true);
-                try { File.Move(tmp, dst); }
-                catch
-                {
-                    try { File.Delete(tmp); } catch { }
-                    if (!File.Exists(dst)) throw;
-                }
-            }
-            _preparedDll = dst;
-            return dst;
+            _preparedDll = src;
+            return src;
         }
 
         // ---- Sinks and messages -----------------------------------------------------------
@@ -389,7 +361,7 @@ namespace Opacbar
                     return;
                 }
                 if (!TryAutoRestart(now, "The taskbar helper didn't start; restarting Explorer..."))
-                    SetStatus(TapStatus.Failed, "The taskbar helper loaded but never answered. Use Quit, then start Opacbar again.");
+                    SetStatus(TapStatus.Failed, "The taskbar helper loaded but never answered. Use Quit, then start OpacityBar again.");
                 return;
             }
 
@@ -407,7 +379,7 @@ namespace Opacbar
             {
                 SetStatus(TapStatus.Missing, ArchName() == null
                     ? "This processor type isn't supported by the taskbar helper."
-                    : "Taskbar helper not found next to Opacbar.exe.");
+                    : "Taskbar helper not found next to OpacityBar.exe.");
                 _nextAttemptMs = now + 5000;
                 return;
             }
@@ -533,7 +505,7 @@ namespace Opacbar
                 _threadDone = true;
             });
             t.IsBackground = true;
-            t.Name = "OpacbarTapInject";
+            t.Name = "OpacityBarTapInject";
             t.Start();
             _thread = t;
         }
@@ -564,7 +536,7 @@ namespace Opacbar
             if (_threadHr == E_NOT_FOUND_HR)
             {
                 // Either the taskbar is still starting, or this Explorer already received an injection
-                // (an earlier Opacbar run) and Windows refuses another one. Retry for a while after Explorer
+                // (an earlier OpacityBar run) and Windows refuses another one. Retry for a while after Explorer
                 // starts; after that, restart Explorer automatically.
                 if (_startingSinceMs == 0) _startingSinceMs = now;
                 if (ExplorerAgeSeconds(pid) > 45 && now - _startingSinceMs > 15000 &&
@@ -594,7 +566,7 @@ namespace Opacbar
         }
 
         /// <summary>
-        /// Body of "Opacbar.exe --inject pid endpoint dll" (no UI, no tray icon): performs exactly one
+        /// Body of "OpacityBar.exe --inject pid endpoint dll" (no UI, no tray icon): performs exactly one
         /// injection on this STA main thread, keeps the process alive 3 s while Explorer completes the
         /// connection, and returns the HRESULT as the exit code. A watchdog ends the process if the
         /// call itself hangs.
@@ -649,6 +621,35 @@ namespace Opacbar
             _ruleError = false;
         }
 
+        /// <summary>
+        /// Uninstall: asks the helper in Explorer to restore the taskbar, disconnect and free itself
+        /// (protocol v3+). Returns true when no helper window is left. Explorer can't load a helper
+        /// again until it restarts, so this is only for leaving for good.
+        /// </summary>
+        public static bool UnloadFromExplorer(int timeoutMs)
+        {
+            try
+            {
+                List<IntPtr> sinks = FindSinks();
+                if (sinks.Count == 0) return true;
+                foreach (IntPtr s in sinks)
+                {
+                    int r;
+                    Send(s, WM_TAP_RESTORE, out r);
+                }
+                int done;
+                Send(sinks[0], WM_TAP_UNLOAD, UIntPtr.Zero, IntPtr.Zero, 3000, out done); // any sink starts it for all
+                Stopwatch sw = Stopwatch.StartNew();
+                while (sw.ElapsedMilliseconds < timeoutMs)
+                {
+                    if (FindSinks().Count == 0) return true;
+                    Thread.Sleep(100);
+                }
+                return FindSinks().Count == 0;
+            }
+            catch { return false; }
+        }
+
         public void Dispose()
         {
             if (_receiver != null)
@@ -701,7 +702,7 @@ namespace Opacbar
                 }
             });
             t.IsBackground = true;
-            t.Name = "OpacbarRestartExplorer";
+            t.Name = "OpacityBarRestartExplorer";
             t.Start();
         }
 
@@ -725,7 +726,7 @@ namespace Opacbar
 
         /// <summary>
         /// Restarts Explorer without asking, rate-limited so a broken helper can never cause a restart loop:
-        /// at most 3 automatic restarts per Opacbar session, at least 2 minutes apart.
+        /// at most 3 automatic restarts per OpacityBar session, at least 2 minutes apart.
         /// </summary>
         private bool TryAutoRestart(long now, string detail)
         {
@@ -775,7 +776,7 @@ namespace Opacbar
             return "unknown";
         }
 
-        /// <summary>Asks every sink for its XAML tree and writes opacbar-taskbar-map.txt to the Desktop. UI thread only.</summary>
+        /// <summary>Asks every sink for its XAML tree and writes opacitybar-taskbar-map.txt to the Desktop. UI thread only.</summary>
         public bool SaveTaskbarMap(out string path, out string error)
         {
             path = null;
@@ -824,7 +825,7 @@ namespace Opacbar
 
             try
             {
-                string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "opacbar-taskbar-map.txt");
+                string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "opacitybar-taskbar-map.txt");
                 File.WriteAllText(file, sb.ToString(), new UTF8Encoding(false));
                 path = file;
                 return true;

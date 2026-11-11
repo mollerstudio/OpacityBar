@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
 using System;
 using System.Globalization;
 using System.Text;
 
-namespace Opacbar
+namespace OpacityBar
 {
     /// <summary>
     /// Compiles a StyleProfile into the rules document the helper applies inside Explorer
@@ -23,7 +27,7 @@ namespace Opacbar
 
         public static string Compile(StyleProfile p)
         {
-            if (p == null) return EmptyDocument();
+            if (p == null || p.Material == Material.Normal) return EmptyDocument();   // stock Windows look
 
             StringBuilder sb = new StringBuilder(Header);
             int rgb;
@@ -75,17 +79,7 @@ namespace Opacbar
         /// <summary>Accepts "#RRGGBB" or "RRGGBB".</summary>
         public static bool TryParseHex(string s, out int rgb)
         {
-            rgb = 0;
-            if (string.IsNullOrEmpty(s)) return false;
-            if (s[0] == '#') s = s.Substring(1);
-            if (s.Length != 6) return false;
-            for (int i = 0; i < 6; i++)
-            {
-                char c = s[i];
-                bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-                if (!ok) return false;
-            }
-            return int.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out rgb);
+            return ColorMath.TryParseHex(s, out rgb);
         }
 
         /// <summary>Returns "#RRGGBB" in upper case, or null if the text is not a valid color.</summary>

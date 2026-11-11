@@ -1,10 +1,14 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace Opacbar
+namespace OpacityBar
 {
     public enum EngineHealth
     {
@@ -106,11 +110,12 @@ namespace Opacbar
             List<IntPtr> taskbars = FindAllTaskbars();
             ActiveTaskbarCount = taskbars.Count;
 
-            if (!_config.Enabled)
+            if (_config.DesktopProfile.Material == Material.Normal)
             {
+                // The stock Windows look: restore once and stay out of the way.
                 if (!_paused || force) RestoreTaskbarsToDefault(taskbars);
                 _paused = true;
-                SetHealth(EngineHealth.Paused, "Opacbar is paused. The taskbar is at its default look.");
+                SetHealth(EngineHealth.Ok, "");
                 return;
             }
             _paused = false;

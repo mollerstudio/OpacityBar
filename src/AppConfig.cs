@@ -1,4 +1,8 @@
-﻿using System;
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -6,7 +10,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
-namespace Opacbar
+namespace OpacityBar
 {
     // Legacy style model (config v3 and older). Kept so old settings files still load; migrated on load.
     public enum TaskbarStyleMode
@@ -19,15 +23,16 @@ namespace Opacbar
         Normal = 5
     }
 
-    // Clear, Color and Blur are the styles. Acrylic and Windows exist only so old settings files
-    // still load; Clamp() turns both into Blur.
+    // Normal (the stock Windows taskbar), Clear, Color and Blur are the styles. Acrylic and Windows
+    // exist only so old settings files still load; Clamp() turns both into Blur.
     public enum Material
     {
         Clear = 0,
         Color = 1,
         Blur = 2,
         Acrylic = 3,
-        Windows = 4
+        Windows = 4,
+        Normal = 5
     }
 
     public class StyleProfile
@@ -93,10 +98,12 @@ namespace Opacbar
 
     public class AppConfig
     {
-        public const int CurrentVersion = 4;
+        public const int CurrentVersion = 5;
         public const int MaxRecentColors = 6;
 
         public int ConfigVersion { get; set; }
+
+        /// <summary>Config v4 and older: the on/off switch. Off is migrated to Material.Normal; always true now.</summary>
         public bool Enabled { get; set; }
 
         /// <summary>The taskbar look (one look for every situation).</summary>
@@ -109,19 +116,8 @@ namespace Opacbar
         public bool LaunchAtStartup { get; set; }  // mirrors the HKCU Run value; not trusted from the file
         public int RefreshRateMs { get; set; }
 
-        // Unused fields from older versions. Kept so their settings files load and round-trip unchanged.
-        public bool FloatingPillEnabled { get; set; }
-        public int CornerRadius { get; set; }
-        public int HorizontalMargin { get; set; }
-        public int VerticalMargin { get; set; }
-        public bool DockedWhenMaximized { get; set; }
-        public bool EnableMaximizedState { get; set; }
-        public StyleProfile MaximizedProfile { get; set; }
-        public bool EnableStartMenuState { get; set; }
-        public StyleProfile StartMenuProfile { get; set; }
-        public bool EnableBatterySaverState { get; set; }
-        public StyleProfile BatterySaverProfile { get; set; }
-        public bool UILightTheme { get; set; }     // v2 flag, migrated into UiTheme
+        /// <summary>v2 flag, migrated into UiTheme. (Other fields of old files are ignored when loading.)</summary>
+        public bool UILightTheme { get; set; }
 
         /// <summary>True when Load() found no settings file (first launch).</summary>
         public static bool IsFirstRun { get; private set; }
@@ -180,13 +176,28 @@ namespace Opacbar
         public static string GetConfigPath()
         {
             if (IsPortable()) return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json");
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Opacbar", "settings.json");
+            return Path.Combine(AppInfo.RoamingDir, "settings.json");
+        }
+
+        /// <summary>Opacbar 1.0 kept its settings in %APPDATA%\Opacbar: copy them over once.</summary>
+        private static void MigrateLegacyFile(string path)
+        {
+            if (IsPortable() || File.Exists(path)) return;
+            try
+            {
+                string old = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Opacbar", "settings.json");
+                if (!File.Exists(old)) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.Copy(old, path, false);
+            }
+            catch { }
         }
 
         public static AppConfig Load()
         {
             AppConfig result = null;
             string path = GetConfigPath();
+            MigrateLegacyFile(path);
             IsFirstRun = !File.Exists(path);
             if (!IsFirstRun)
             {
@@ -220,6 +231,12 @@ namespace Opacbar
                     // v3 -> v4: Mode/Luminance became Material/Color.
                     result.DesktopProfile.MigrateFromLegacy();
                 }
+                if (result.ConfigVersion < 5 && !result.Enabled && result.DesktopProfile != null)
+                {
+                    // v4 -> v5: the on/off switch became the "Normal" style.
+                    result.DesktopProfile.Material = Material.Normal;
+                }
+                result.Enabled = true;
                 result.ConfigVersion = CurrentVersion;
                 result.Clamp();
             }
@@ -276,46 +293,16 @@ namespace Opacbar
         }
 
         // ---- Start with Windows ------------------------------------------------------
-        // The installer writes the same value (installer/Opacbar.iss): HKCU Run, "Opacbar" = "\"<exe>\" --minimized".
-
-        private const string RunRegistryPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-        private const string RunValueName = "Opacbar";
+        // The installer writes the same value: HKCU Run, "OpacityBar" = "\"<exe>\" --minimized".
 
         public static bool IsStartupEnabled()
         {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryPath, false))
-                {
-                    if (key != null) return key.GetValue(RunValueName) != null;
-                }
-            }
-            catch { }
-            return false;
+            return Lifecycle.IsRunAtStartup();
         }
 
         public static void SetStartup(bool enable)
         {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryPath, true))
-                {
-                    if (key == null) return;
-                    if (enable)
-                    {
-                        string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                        string wanted = "\"" + exePath + "\" --minimized";
-                        object cur = key.GetValue(RunValueName);
-                        if (cur == null || !string.Equals(cur.ToString(), wanted, StringComparison.OrdinalIgnoreCase))
-                            key.SetValue(RunValueName, wanted);
-                    }
-                    else if (key.GetValue(RunValueName) != null)
-                    {
-                        key.DeleteValue(RunValueName, false);
-                    }
-                }
-            }
-            catch { }
+            Lifecycle.SetRunAtStartup(System.Reflection.Assembly.GetExecutingAssembly().Location, enable);
         }
 
         private static string FormatJson(string json)

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 moller.studio
+// OpacityBar: https://github.com/mollerstudio/OpacityBar
+
 // =====================================================================================
 //  OpacbarTAP.cpp - the small helper that Opacbar loads into explorer.exe  (protocol v6)
 // =====================================================================================

@@ -1,0 +1,37 @@
+name: Bug report
+description: Something doesn't work or looks wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what did you see instead? Screenshots help.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpacityBar version
+      description: Shown at the bottom of the settings page (gear icon).
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Run `winver` and copy the version and build.
+      placeholder: "Windows 11 24H2, build 26100.2314"
+    validations:
+      required: true
+  - type: dropdown
+    id: style
+    attributes:
+      label: Style
+      options: [Normal, Clear, Color, Blur, Not related to a style]
+  - type: textarea
+    id: log
+    attributes:
+      label: Diagnostics log (optional)
+      description: Start `OpacityBar.exe --diagnostics`, reproduce the problem, then attach `%LocalAppData%\OpacityBar\opacitybar.log`.

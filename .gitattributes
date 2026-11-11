@@ -1,0 +1,16 @@
+# Normalize text files; keep Windows scripts in CRLF.
+* text=auto
+*.cs      text diff=csharp
+*.cpp     text diff=cpp
+*.md      text
+*.yml     text
+*.ps1     text eol=crlf
+*.bat     text eol=crlf
+*.manifest text eol=crlf
+
+# Binary assets
+*.ico     binary
+*.png     binary
+*.dll     binary
+*.exe     binary
+*.pdf     binary

@@ -1,12 +1,12 @@
-# Opacbar style guide
+# OpacityBar style guide
 
 Modern, minimal, monochrome. The UI should feel like a native Windows 11 flyout that happens to be black and white.
 These tokens are implemented one-to-one in `src/ThemeAndControls.cs` (`Theme` static class).
 
 ## Color
 
-The brand is monochrome, and that applies to **Opacbar's own UI only**. Chrome is black, white and grays; color appears only to mean something (success, warning, error), and only sparingly:
-a status dot, an error-red "Quit". Toggles and selections are white (dark theme) or near-black (light theme), never green. The one exception is user content: the taskbar color picker and its swatches show real colors, because the user is choosing a color.
+The brand is monochrome, and that applies to **OpacityBar's own UI only**. Chrome is black, white and grays; color appears only to mean something (success, warning, error), and only sparingly:
+a problem note, an error-red "Quit". Toggles and selections are white (dark theme) or near-black (light theme), never green. The one exception is user content: the taskbar color picker and its swatches show real colors, because the user is choosing a color.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
@@ -20,11 +20,11 @@ a status dot, an error-red "Quit". Toggles and selections are white (dark theme)
 | Track off | `#8A8A8A` | `#7A7A7A` | Toggle outline and knob when off |
 | On fill | `#FFFFFF` | `#111111` | Toggle on, selected segment, slider fill and thumb |
 | On fill text | `#000000` | `#FFFFFF` | Text/knob drawn on "on fill" |
-| Success | `#3FB950` | `#1A7F37` | Status dot: running |
+| Success | `#3FB950` | `#1A7F37` | (reserved) |
 | Warning | `#E3B341` | `#9A6700` | Status dot and note: needs attention |
 | Error | `#F85149` | `#CF222E` | Status dot and note: failed; destructive text |
 
-The theme follows Windows app mode (`AppsUseLightTheme`) unless the user picks Dark or Light in General.
+The theme follows Windows app mode (`AppsUseLightTheme`) unless the user picks Dark or Light in Settings (the gear).
 Disabled controls blend their ink 60% toward Surface.
 
 ## Type
@@ -34,7 +34,7 @@ Sizes are in points; render as pixels = pt x 96/72 x scale (`GraphicsUnit.Pixel`
 
 | Style | Size | Weight | Use |
 |---|---|---|---|
-| Title | 14 pt | Bold | "Opacbar" |
+| Title | 14 pt | Bold | "OpacityBar" |
 | Body | 10 pt | Regular | Labels, buttons, values, menu |
 | Caption | 9 pt | Regular / Bold | Hints, status, section headers (bold), segment text |
 | Small | 8 pt | Regular | Footer |
