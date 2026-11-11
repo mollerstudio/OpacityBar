@@ -9,6 +9,10 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 The first public release, under the new name **OpacityBar** (previously Opacbar).
 
+> **Tested on Windows 11 ARM64.** Normal x64 PCs and Windows 10 should work but haven't been confirmed yet.
+> Please [report how it runs on your PC](https://github.com/mollerstudio/OpacityBar/issues/new/choose), even if
+> everything works. If anything looks wrong, Quit (or Ctrl+Shift+Alt+Q) restores the normal taskbar right away.
+
 ### Added
 - New installer: one window, one **Install** button. It updates an existing copy in place, needs no admin
   rights, and can start OpacityBar with Windows. Uninstall from Settings > Apps.

@@ -1,0 +1,41 @@
+name: Compatibility report
+description: Tell us how OpacityBar runs on your PC, even if everything works.
+labels: [compatibility]
+body:
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: Run `winver` and copy the version and build.
+      placeholder: "Windows 11 24H2, build 26100.2314"
+    validations:
+      required: true
+  - type: dropdown
+    id: cpu
+    attributes:
+      label: Processor
+      options: [x64 (Intel / AMD), ARM64 (Snapdragon etc.), Not sure]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OpacityBar version
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: checkboxes
+    id: works
+    attributes:
+      label: What worked?
+      options:
+        - label: Normal
+        - label: Clear
+        - label: Color
+        - label: Blur
+        - label: Installer / update
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything odd?
+      description: Optional. Screenshots welcome.

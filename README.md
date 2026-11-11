@@ -49,6 +49,11 @@ The installer installs for your account only (to `%LocalAppData%\Programs\Opacit
 - The **gear** opens settings: start with Windows, light/dark theme, reset, quit.
 - **Ctrl + Shift + Alt + Q** quits instantly and restores the normal taskbar.
 
+> **Help wanted: tell us how it runs on your PC.** OpacityBar is tested on Windows 11 ARM64. Normal x64 PCs and
+> Windows 10 should work but haven't been confirmed yet. If you try it, please
+> [report how it went](https://github.com/mollerstudio/OpacityBar/issues/new/choose), even if everything works.
+> If anything looks wrong, **Quit** (or Ctrl+Shift+Alt+Q) puts the normal taskbar back right away.
+
 **Requirements:** Windows 11 (any version) or Windows 10, x64 or ARM64. The .NET Framework 4.8 it uses is built into Windows. On Windows 10, Clear/Color/Blur use the classic transparency API.
 
 ## How it works
@@ -114,4 +119,5 @@ The code is [MIT](LICENSE) © 2026 [moller.studio](https://moller.studio). The O
 covered by the MIT license; see [TRADEMARKS.md](TRADEMARKS.md). Contributions are welcome under the same license
 ([CONTRIBUTING.md](CONTRIBUTING.md), [Code of conduct](CODE_OF_CONDUCT.md)).
 
-OpacityBar is an independent project, not affiliated with Microsoft.
+Built by [moller.studio](https://moller.studio) with AI-assisted development (Claude). All code is reviewed, tested
+and open for anyone to audit. OpacityBar is an independent project, not affiliated with Microsoft.
