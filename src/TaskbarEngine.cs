@@ -2,20 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Windows.Forms;
 
 namespace Opacbar
 {
-    public enum DynamicActivityState
-    {
-        Desktop = 0,
-        MaximizedWindow = 1,
-        StartOrSearchOpen = 2,
-        BatterySaver = 3,
-        Disabled = 4
-    }
-
     public enum EngineHealth
     {
         Ok = 0,
@@ -27,30 +17,34 @@ namespace Opacbar
         Connecting = 6
     }
 
+    /// <summary>
+    /// Keeps the taskbar in the configured look. Windows 11: rules for the helper inside Explorer
+    /// (TapHelper). Windows 10 (build below 22000): the DWM accent policy on the taskbar windows.
+    /// </summary>
     public class TaskbarEngine : IDisposable
     {
         private static readonly Stopwatch Clock = Stopwatch.StartNew();
 
-        private AppConfig _config;
+        private readonly AppConfig _config;
+        private readonly TapHelper _tap = new TapHelper();
+        private readonly bool _isWin11 = IsWindows11();
         private Timer _refreshTimer;
-        private Timer _fastTimer; // follows up throttled helper sends while a color is being dragged
-        private TapHelper _tap = new TapHelper();
-        private DynamicActivityState _lastDetectedState = DynamicActivityState.Desktop;
+        private Timer _fastTimer; // follows up throttled helper sends while a slider is dragged
+
+        private bool _paused;
         private EngineHealth _health = EngineHealth.Ok;
         private string _healthDetail = "";
-        private int _lastCount = -1;
+        private bool _notified;
+        private EngineHealth _notifiedHealth;
+        private int _notifiedCount;
 
+        // Windows 10 accent state per taskbar window: last applied key and time.
         private readonly Dictionary<IntPtr, string> _accentKeys = new Dictionary<IntPtr, string>();
         private readonly Dictionary<IntPtr, long> _accentMs = new Dictionary<IntPtr, long>();
-        private readonly HashSet<IntPtr> _maximizedMonitors = new HashSet<IntPtr>();
 
-        private int _foregroundPidCached;
-        private bool _foregroundIsStartCached;
-        private bool? _isWin11;
+        /// <summary>Raised when health or the number of taskbars changes.</summary>
+        public event Action StateUpdated;
 
-        public event Action<DynamicActivityState, int> StateUpdated;
-
-        public DynamicActivityState CurrentState { get { return _lastDetectedState; } }
         public int ActiveTaskbarCount { get; private set; }
         public EngineHealth Health { get { return _health; } }
         public string HealthDetail { get { return _healthDetail; } }
@@ -65,7 +59,7 @@ namespace Opacbar
             _fastTimer = new Timer();
             _fastTimer.Interval = 35;
             _fastTimer.Tick += OnFastTick;
-            ApplyImmediate(true);
+            Apply(true);
         }
 
         private static int ClampInterval(int ms)
@@ -74,281 +68,114 @@ namespace Opacbar
             return Math.Max(100, Math.Min(1000, ms));
         }
 
-        public void UpdateConfig(AppConfig config)
+        private static bool IsWindows11()
         {
-            _config = config;
-            int iv = ClampInterval(_config.RefreshRateMs);
-            if (_refreshTimer.Interval != iv) _refreshTimer.Interval = iv;
-            ApplyImmediate(true);
-        }
-
-        private void OnTick(object sender, EventArgs e)
-        {
-            try { ApplyImmediate(false); }
-            catch { }
-        }
-
-        private void OnFastTick(object sender, EventArgs e)
-        {
-            try { ApplyImmediate(false); }
-            catch { }
-            if (!_tap.HasPending && _fastTimer != null) _fastTimer.Stop();
-        }
-
-        private static long NowMs() { return Clock.ElapsedMilliseconds; }
-
-        private bool IsWindows11()
-        {
-            if (_isWin11.HasValue) return _isWin11.Value;
-            bool r = true;
             try
             {
                 NativeMethods.OSVERSIONINFOEX v = new NativeMethods.OSVERSIONINFOEX();
                 v.dwOSVersionInfoSize = Marshal.SizeOf(typeof(NativeMethods.OSVERSIONINFOEX));
-                if (NativeMethods.RtlGetVersion(ref v) == 0) r = v.dwBuildNumber >= 22000;
+                if (NativeMethods.RtlGetVersion(ref v) == 0) return v.dwBuildNumber >= 22000;
             }
             catch { }
-            _isWin11 = r;
-            return r;
+            return true;
         }
 
-        public void ApplyImmediate(bool force = false)
+        /// <summary>Call after changing the config: applies it right away.</summary>
+        public void ConfigChanged()
         {
-            long now = NowMs();
+            int iv = ClampInterval(_config.RefreshRateMs);
+            if (_refreshTimer != null && _refreshTimer.Interval != iv) _refreshTimer.Interval = iv;
+            Apply(true);
+        }
+
+        private void OnTick(object sender, EventArgs e)
+        {
+            try { Apply(false); }
+            catch (Exception ex) { Diagnostics.Log("apply failed: " + ex.Message); }
+        }
+
+        private void OnFastTick(object sender, EventArgs e)
+        {
+            try { Apply(false); }
+            catch (Exception ex) { Diagnostics.Log("apply failed: " + ex.Message); }
+            if (!_tap.HasPending && _fastTimer != null) _fastTimer.Stop();
+        }
+
+        private void Apply(bool force)
+        {
             List<IntPtr> taskbars = FindAllTaskbars();
             ActiveTaskbarCount = taskbars.Count;
 
             if (!_config.Enabled)
             {
-                if (_lastDetectedState != DynamicActivityState.Disabled || force)
-                {
-                    RestoreTaskbarsToDefault(taskbars);
-                    _lastDetectedState = DynamicActivityState.Disabled;
-                }
+                if (!_paused || force) RestoreTaskbarsToDefault(taskbars);
+                _paused = true;
                 SetHealth(EngineHealth.Paused, "Opacbar is paused. The taskbar is at its default look.");
-                NotifyIfChanged(DynamicActivityState.Disabled);
                 return;
             }
+            _paused = false;
 
             if (taskbars.Count == 0)
             {
                 SetHealth(EngineHealth.NoTaskbar, "Can't find the Windows taskbar right now (Explorer may be restarting).");
-                NotifyIfChanged(_lastDetectedState == DynamicActivityState.Disabled ? DynamicActivityState.Desktop : _lastDetectedState);
                 return;
             }
 
-            DynamicActivityState state = DetectDynamicState();
-            StyleProfile profile = ResolveProfileForState(state);
+            StyleProfile look = _config.DesktopProfile;
+            if (!_isWin11)
+            {
+                long now = Clock.ElapsedMilliseconds;
+                foreach (IntPtr hwnd in taskbars) ApplyAccent(hwnd, look, force, now);
+                SetHealth(EngineHealth.Ok, "");
+                return;
+            }
+
+            string doc = TaskbarStyle.Compile(look);
+            bool styled = doc != TaskbarStyle.EmptyDocument(); // only load the helper when a rule exists
+            uint pid;
+            NativeMethods.GetWindowThreadProcessId(taskbars[0], out pid);
+            try { _tap.Sync(pid, styled, doc); }
+            catch (Exception ex)
+            {
+                SetHealth(EngineHealth.HelperFailed, "Taskbar helper error (" + ex.Message + ").");
+                return;
+            }
+            if (_tap.HasPending && _fastTimer != null && !_fastTimer.Enabled) _fastTimer.Start();
 
             EngineHealth health = EngineHealth.Ok;
             string detail = "";
-            if (IsWindows11())
+            if (styled)
             {
-                // Windows 11: everything goes through the XAML helper as brushes on the taskbar background.
-                string doc = TaskbarStyle.Compile(profile);
-                bool styled = doc != TaskbarStyle.EmptyDocument();   // only load the helper when a rule exists
-                uint pid = 0;
-                NativeMethods.GetWindowThreadProcessId(taskbars[0], out pid);
-                try { _tap.Sync(pid, styled, doc); }
-                catch (Exception ex)
+                switch (_tap.Status)
                 {
-                    health = EngineHealth.HelperFailed;
-                    detail = "Taskbar helper error (" + ex.Message + ").";
-                }
-
-                // Blur / Acrylic: the helper made the XAML background transparent; the DWM accent on the
-                // taskbar window supplies the blur. Explorer resets accents, so this re-applies ~4x/s.
-                // When leaving Blur/Acrylic, put the accent back once so no stale blur remains.
-                // The DWM blur accent renders black on the Win11 taskbar (verified on build 26300), so it is
-                // no longer applied; this loop only removes an accent a previous version may have left behind.
-                bool blurry = false;
-                foreach (IntPtr hwnd in taskbars)
-                {
-                    if (blurry)
-                    {
-                        ApplyAccent(hwnd, profile, force, now);
-                    }
-                    else if (_accentKeys.ContainsKey(hwnd))
-                    {
-                        NativeMethods.AccentPolicy reset = new NativeMethods.AccentPolicy();
-                        reset.AccentState = profile.Material == Material.Windows
-                            ? NativeMethods.AccentState.ACCENT_DISABLED
-                            : NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
-                        reset.AccentFlags = profile.Material == Material.Windows ? 0u : 2u;
-                        SetAccent(hwnd, reset);
-                        _accentKeys.Remove(hwnd);
-                        _accentMs.Remove(hwnd);
-                    }
-                }
-
-                if (health == EngineHealth.Ok && styled)
-                {
-                    switch (_tap.Status)
-                    {
-                        case TapStatus.Missing: health = EngineHealth.HelperMissing; detail = _tap.Detail; break;
-                        case TapStatus.Failed: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
-                        case TapStatus.Rejected: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
-                        case TapStatus.Outdated: health = EngineHealth.HelperOutdated; detail = _tap.Detail; break;
-                        case TapStatus.Injecting: health = EngineHealth.Connecting; detail = _tap.Detail; break;
-                        case TapStatus.Idle: health = EngineHealth.Connecting; detail = ""; break;
-                    }
-                }
-                if (_tap.HasPending && _fastTimer != null && !_fastTimer.Enabled) _fastTimer.Start();
-            }
-            else
-            {
-                // Windows 10 fallback: the DWM accent policy still works on the classic taskbar.
-                foreach (IntPtr hwnd in taskbars)
-                {
-                    ApplyAccent(hwnd, profile, force, now);
+                    case TapStatus.Missing: health = EngineHealth.HelperMissing; detail = _tap.Detail; break;
+                    case TapStatus.Failed:
+                    case TapStatus.Rejected: health = EngineHealth.HelperFailed; detail = _tap.Detail; break;
+                    case TapStatus.Outdated: health = EngineHealth.HelperOutdated; detail = _tap.Detail; break;
+                    case TapStatus.Injecting: health = EngineHealth.Connecting; detail = _tap.Detail; break;
+                    case TapStatus.Idle: health = EngineHealth.Connecting; break;
                 }
             }
             SetHealth(health, detail);
-
-            NotifyIfChanged(state);
         }
 
         private void SetHealth(EngineHealth h, string detail)
         {
             _health = h;
             _healthDetail = detail ?? "";
-        }
-
-        private EngineHealth _notifiedHealth = EngineHealth.Ok;
-        private bool _notifiedOnce;
-
-        private void NotifyIfChanged(DynamicActivityState state)
-        {
-            bool changed = !_notifiedOnce || state != _lastDetectedState || ActiveTaskbarCount != _lastCount || _health != _notifiedHealth;
-            _notifiedOnce = true;
-            _lastDetectedState = state;
-            _lastCount = ActiveTaskbarCount;
-            _notifiedHealth = _health;
-            if (changed && StateUpdated != null)
+            bool changed = !_notified || h != _notifiedHealth || ActiveTaskbarCount != _notifiedCount;
+            _notified = true;
+            _notifiedHealth = h;
+            _notifiedCount = ActiveTaskbarCount;
+            Action handler = StateUpdated;
+            if (changed && handler != null)
             {
-                try { StateUpdated(_lastDetectedState, ActiveTaskbarCount); }
+                try { handler(); }
                 catch { }
             }
         }
 
-        private StyleProfile ResolveProfileForState(DynamicActivityState state)
-        {
-            // One look for every situation (owner decision 2026-11-08): the per-situation
-            // profiles stay in the config file for compatibility but are no longer used.
-            if (_config.DesktopProfile != null) return _config.DesktopProfile;
-            switch (state)
-            {
-                case DynamicActivityState.BatterySaver: return _config.BatterySaverProfile;
-                case DynamicActivityState.StartOrSearchOpen: return _config.StartMenuProfile;
-                case DynamicActivityState.MaximizedWindow: return _config.MaximizedProfile;
-                default: return _config.DesktopProfile;
-            }
-        }
-
-        // ------------------------------------------------------------------ state detection
-
-        private DynamicActivityState DetectDynamicState()
-        {
-            _maximizedMonitors.Clear();
-            if (_config.EnableMaximizedState) CollectMaximizedMonitors();
-
-            if (_config.EnableBatterySaverState && IsBatterySaverOn())
-                return DynamicActivityState.BatterySaver;
-
-            if (_config.EnableStartMenuState && IsStartOrSearchForeground())
-                return DynamicActivityState.StartOrSearchOpen;
-
-            if (_config.EnableMaximizedState && _maximizedMonitors.Count > 0)
-                return DynamicActivityState.MaximizedWindow;
-
-            return DynamicActivityState.Desktop;
-        }
-
-        private static bool IsBatterySaverOn()
-        {
-            try
-            {
-                NativeMethods.SYSTEM_POWER_STATUS s;
-                if (NativeMethods.GetSystemPowerStatus(out s)) return s.SystemStatusFlag == 1;
-            }
-            catch { }
-            return false;
-        }
-
-        private bool IsStartOrSearchForeground()
-        {
-            IntPtr fg = NativeMethods.GetForegroundWindow();
-            if (fg == IntPtr.Zero) return false;
-
-            uint pid;
-            NativeMethods.GetWindowThreadProcessId(fg, out pid);
-            if (pid == 0) return false;
-
-            string cls = NativeMethods.GetWindowClassName(fg);
-            bool coreWin = (cls == "Windows.UI.Core.CoreWindow");
-            if (!coreWin) return false;
-
-            if ((int)pid == _foregroundPidCached) return _foregroundIsStartCached;
-
-            string name = GetProcessImageName(pid);
-            bool isStart = name != null &&
-                (name.Equals("StartMenuExperienceHost.exe", StringComparison.OrdinalIgnoreCase) ||
-                 name.Equals("SearchHost.exe", StringComparison.OrdinalIgnoreCase) ||
-                 name.Equals("SearchApp.exe", StringComparison.OrdinalIgnoreCase));
-            _foregroundPidCached = (int)pid;
-            _foregroundIsStartCached = isStart;
-            return isStart;
-        }
-
-        private static string GetProcessImageName(uint pid)
-        {
-            IntPtr h = NativeMethods.OpenProcess(NativeMethods.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-            if (h == IntPtr.Zero) return null;
-            try
-            {
-                StringBuilder sb = new StringBuilder(520);
-                int size = sb.Capacity;
-                if (!NativeMethods.QueryFullProcessImageName(h, 0, sb, ref size)) return null;
-                string path = sb.ToString();
-                int i = path.LastIndexOf('\\');
-                return i >= 0 ? path.Substring(i + 1) : path;
-            }
-            finally
-            {
-                NativeMethods.CloseHandle(h);
-            }
-        }
-
-        private void CollectMaximizedMonitors()
-        {
-            NativeMethods.EnumWindows(delegate (IntPtr hwnd, IntPtr lParam)
-            {
-                if (IsRegularWindowMaximized(hwnd))
-                {
-                    IntPtr mon = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
-                    _maximizedMonitors.Add(mon);
-                }
-                return true;
-            }, IntPtr.Zero);
-        }
-
-        private static bool IsRegularWindowMaximized(IntPtr hwnd)
-        {
-            if (!NativeMethods.IsZoomed(hwnd)) return false;
-            if (!NativeMethods.IsWindowVisible(hwnd)) return false;
-            if (NativeMethods.IsIconic(hwnd)) return false;
-
-            int cloaked;
-            if (NativeMethods.DwmGetWindowAttribute(hwnd, NativeMethods.DWMWA_CLOAKED, out cloaked, sizeof(int)) == 0 && cloaked != 0)
-                return false;
-
-            string cls = NativeMethods.GetWindowClassName(hwnd);
-            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd")
-                return false;
-            return true;
-        }
-
-        public List<IntPtr> FindAllTaskbars()
+        public static List<IntPtr> FindAllTaskbars()
         {
             List<IntPtr> list = new List<IntPtr>();
             IntPtr main = NativeMethods.FindWindow("Shell_TrayWnd", null);
@@ -364,14 +191,12 @@ namespace Opacbar
             return list;
         }
 
-        // ------------------------------------------------------------------ accent (Windows 10 only)
+        // ---- Windows 10: DWM accent policy ---------------------------------------------
 
         private void ApplyAccent(IntPtr hwnd, StyleProfile p, bool force, long now)
         {
             NativeMethods.AccentPolicy policy = new NativeMethods.AccentPolicy();
             policy.AccentFlags = 2;
-            policy.AnimationId = 0;
-            policy.GradientColor = 0;
 
             int rgb;
             if (!TaskbarStyle.TryParseHex(p.Color, out rgb)) rgb = 0;
@@ -381,43 +206,29 @@ namespace Opacbar
 
             switch (p.Material)
             {
-                case Material.Blur:
-                    // Plain blur, lightly tinted with the chosen color (60% of the opacity setting).
+                case Material.Clear:
+                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
+                    break;
+                case Material.Color:
+                    policy.AccentState = alpha >= 255
+                        ? NativeMethods.AccentState.ACCENT_ENABLE_GRADIENT
+                        : NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
+                    policy.GradientColor = ((uint)alpha << 24) | abgr;
+                    break;
+                default: // Blur, lightly tinted with the chosen color (60% of the tint setting)
                     policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_BLURBEHIND;
                     policy.GradientColor = ((uint)(alpha * 6 / 10) << 24) | abgr;
                     break;
-                case Material.Acrylic:
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_ACRYLICBLURBEHIND;
-                    policy.GradientColor = ((uint)Math.Max(1, alpha) << 24) | abgr; // alpha >= 1 so it doesn't fall back to black
-                    break;
-                case Material.Color:
-                    policy.AccentState = alpha >= 255 ? NativeMethods.AccentState.ACCENT_ENABLE_GRADIENT : NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
-                    policy.GradientColor = ((uint)alpha << 24) | abgr;
-                    break;
-                case Material.Windows:
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
-                    policy.AccentFlags = 0;
-                    break;
-                default: // Clear
-                    policy.AccentState = NativeMethods.AccentState.ACCENT_ENABLE_TRANSPARENTGRADIENT;
-                    break;
             }
 
-            bool stock = p.Material == Material.Windows;
+            // Explorer resets the accent now and then, so it is re-applied about 4 times a second.
             string key = policy.AccentState + "/" + policy.GradientColor;
             string prevKey;
             long prevMs;
-            if (!force && stock &&
-                _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key &&
-                _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 2000)
+            if (!force && _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key &&
+                _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 240)
             {
-                return; // already default; don't poke it every tick
-            }
-            if (!force && !stock &&
-                _accentMs.TryGetValue(hwnd, out prevMs) && now - prevMs < 240 &&
-                _accentKeys.TryGetValue(hwnd, out prevKey) && prevKey == key)
-            {
-                return; // throttle to ~4/s
+                return;
             }
 
             SetAccent(hwnd, policy);
@@ -444,15 +255,15 @@ namespace Opacbar
             }
         }
 
-        // ------------------------------------------------------------------ restore / helper actions / dispose
+        // ---- Restore / Explorer / developer -------------------------------------------
 
-        public void RestoreTaskbarsToDefault(List<IntPtr> taskbars = null)
+        public void RestoreTaskbarsToDefault(List<IntPtr> taskbars)
         {
             if (taskbars == null) taskbars = FindAllTaskbars();
 
             try { _tap.Restore(); } catch { }
 
-            if (!IsWindows11())
+            if (!_isWin11)
             {
                 NativeMethods.AccentPolicy off = new NativeMethods.AccentPolicy();
                 off.AccentState = NativeMethods.AccentState.ACCENT_DISABLED;
@@ -472,7 +283,7 @@ namespace Opacbar
             _tap.RestartExplorer();
         }
 
-        /// <summary>Developer action: writes the taskbar XAML tree to the Desktop.</summary>
+        /// <summary>Diagnostics only: writes the taskbar XAML tree to the Desktop.</summary>
         public bool SaveTaskbarMap(out string path, out string error)
         {
             return _tap.SaveTaskbarMap(out path, out error);
@@ -492,7 +303,7 @@ namespace Opacbar
                 _fastTimer.Dispose();
                 _fastTimer = null;
             }
-            RestoreTaskbarsToDefault();
+            RestoreTaskbarsToDefault(null);
             _tap.Dispose();
         }
     }

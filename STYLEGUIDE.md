@@ -1,4 +1,4 @@
-﻿# Opacbar style guide
+# Opacbar style guide
 
 Modern, minimal, monochrome. The UI should feel like a native Windows 11 flyout that happens to be black and white.
 These tokens are implemented one-to-one in `src/ThemeAndControls.cs` (`Theme` static class).
@@ -59,24 +59,23 @@ Hides on focus loss (not while being dragged or while a dialog is open) and on E
 |---|---|
 | Toggle | 40 x 20. Off: 1 px outline + small knob, both Track off. On: filled On fill with On fill text knob. Space/Enter toggles. |
 | Segmented | 32 high, Raised track, equal-width segments inset 2. Selected: On fill with On fill text. Hover: Hover. Left/Right arrows move. |
-| Slider | Label left, value right (secondary), track 4 high, thumb 16 round. Shade slider uses a black-to-white gradient track. Arrows, PageUp/Down, Home/End. |
-| Row | 36 high (52 with a description). Label left, one control right. Clicking the row toggles its toggle. |
+| Slider | Label left, value right (secondary), track 4 high, thumb 16 round. Arrows, PageUp/Down, Home/End. |
+| Row | 36 high. Label left, one control right. Clicking the row toggles its toggle. |
 | Section header | Caption bold, secondary, 24 high, text at the bottom. |
 | Button | 36 high, full width, 1 px Border, Raised on hover. Danger buttons use Error-colored text, never an error-colored fill. |
 | Status | 8 px dot + Caption text. Dot is Success, Warning, Error, or gray when off/paused. |
-| Color row | 36 high. Label "Color" left; right: 20 px rounded color chip (1 px Track off outline), hex in secondary text, chevron. Click or Space/Enter expands the picker. Hidden for Clear and Windows. |
+| Color row | 36 high. Label "Color" left; right: 20 px rounded color chip (1 px Track off outline), hex in secondary text, chevron. Click or Space/Enter expands the picker. Hidden for Clear. |
 | Color picker | Inline panel under the color row, 1 px Border, radius 8, padding 8. Saturation/value square (120 high, radius 6, thumb 14 px white ring with dark halo), hue strip (14 high, fully round), hex box (120 x 28, Raised, 1 px Border; Error-colored 1.5 px border and "Use #RRGGBB" when invalid), then a swatch row of 22 px chips: black, white, three grays, a gap, then up to 6 recent colors (selected chip gets a 1.5 px Text ring). Everything is owner-drawn from the single DPI scale. Dragging applies live (helper sends are throttled to about 30 per second); recents are saved when a drag ends, a swatch is clicked, or a hex value is committed. |
-| Hint | Caption, secondary. Under Blur and Acrylic: "Needs Windows transparency effects on"; shown with a Warning dot when Windows transparency effects are off. |
+| Hint | Caption, secondary. Under Blur: "Needs Windows transparency effects on"; shown with a Warning dot when Windows transparency effects are off. |
 | Focus | 1.5 px Text-colored ring, only when navigating by keyboard. |
 
 ## Voice and copy
 
 - Short and plain. Say what it does, not how it works.
-- Sentence case everywhere ("Use a different look", not "Use A Different Look").
+- Sentence case everywhere ("Hide top line", not "Hide Top Line").
 - No jargon: not "luminance", "accent policy", "alpha", "backdrop". Use "color", "opacity", "style".
 - Verbs for actions: "Open settings file", "Reset to defaults", "Quit and restore taskbar".
-- Style names: Clear, Color, Blur, Acrylic, Windows (the stock look).
-- Situations: Desktop, Maximized, Start, Battery.
+- Style names: Clear, Color, Blur. One look for everything (no per-situation looks).
 - Errors say what happened and what to do, in one line. No exclamation marks, no emoji.
 - Footer: "Open source · no network · no admin". Emergency quit: Ctrl+Shift+Alt+Q.
 

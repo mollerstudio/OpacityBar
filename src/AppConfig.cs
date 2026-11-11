@@ -1,12 +1,14 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 using Microsoft.Win32;
 
 namespace Opacbar
 {
-    // Legacy (config v3 and older). Kept so old settings files still load; migrated to Material on load.
+    // Legacy style model (config v3 and older). Kept so old settings files still load; migrated on load.
     public enum TaskbarStyleMode
     {
         Clear = 0,
@@ -17,23 +19,26 @@ namespace Opacbar
         Normal = 5
     }
 
+    // Clear, Color and Blur are the styles. Acrylic and Windows exist only so old settings files
+    // still load; Clamp() turns both into Blur.
     public enum Material
     {
         Clear = 0,
         Color = 1,
         Blur = 2,
         Acrylic = 3,
-        Windows = 4   // stock look: no rules are sent
+        Windows = 4
     }
 
     public class StyleProfile
     {
         public Material Material { get; set; }
         public string Color { get; set; }      // "#RRGGBB"
-        public int Opacity { get; set; }       // 0 - 100
+        public int Opacity { get; set; }       // 0 - 100 (Blur: strength of the tint over the blur)
         public bool HideTopLine { get; set; }
+        public int BlurAmount { get; set; }    // 0 - 100, blur strength for the Blur style
 
-        // Legacy fields (config v3). Read only by the one-time migration; otherwise ignored.
+        // Legacy fields (config v3). Read only by MigrateFromLegacy.
         public TaskbarStyleMode Mode { get; set; }
         public int Luminance { get; set; }
         public bool ShowTopLine { get; set; }
@@ -44,9 +49,7 @@ namespace Opacbar
             Color = "#000000";
             Opacity = 0;
             HideTopLine = true;
-            Mode = TaskbarStyleMode.Clear;
-            Luminance = 0;
-            ShowTopLine = false;
+            BlurAmount = 30;
         }
 
         public StyleProfile(Material m, string color, int opacity) : this()
@@ -58,28 +61,19 @@ namespace Opacbar
 
         public StyleProfile Clone()
         {
-            return new StyleProfile
-            {
-                Material = this.Material,
-                Color = this.Color,
-                Opacity = this.Opacity,
-                HideTopLine = this.HideTopLine,
-                Mode = this.Mode,
-                Luminance = this.Luminance,
-                ShowTopLine = this.ShowTopLine
-            };
+            return (StyleProfile)MemberwiseClone();
         }
 
-        /// <summary>Old Mode/Luminance model to the new one. Mode Tinted becomes Color, Solid becomes Color at 100%, Normal becomes Windows.</summary>
+        /// <summary>Config v3 Mode/Luminance to Material/Color.</summary>
         public void MigrateFromLegacy()
         {
             switch (Mode)
             {
-                case TaskbarStyleMode.Acrylic: Material = Material.Acrylic; break;
-                case TaskbarStyleMode.Blur: Material = Material.Blur; break;
+                case TaskbarStyleMode.Acrylic:
+                case TaskbarStyleMode.Blur:
+                case TaskbarStyleMode.Normal: Material = Material.Blur; break;
                 case TaskbarStyleMode.Tinted: Material = Material.Color; break;
                 case TaskbarStyleMode.Solid: Material = Material.Color; Opacity = 100; break;
-                case TaskbarStyleMode.Normal: Material = Material.Windows; break;
                 default: Material = Material.Clear; break;
             }
             int l = Math.Max(0, Math.Min(255, Luminance));
@@ -90,9 +84,10 @@ namespace Opacbar
         public void Clamp()
         {
             Opacity = Math.Max(0, Math.Min(100, Opacity));
+            BlurAmount = Math.Max(0, Math.Min(100, BlurAmount));
+            if (Material == Material.Acrylic || Material == Material.Windows) Material = Material.Blur;
             if (!Enum.IsDefined(typeof(Material), Material)) Material = Material.Clear;
-            string n = TaskbarStyle.NormalizeHex(Color);
-            Color = n ?? "#000000";
+            Color = TaskbarStyle.NormalizeHex(Color) ?? "#000000";
         }
     }
 
@@ -102,34 +97,32 @@ namespace Opacbar
         public const int MaxRecentColors = 6;
 
         public int ConfigVersion { get; set; }
-
-        // Master toggle
         public bool Enabled { get; set; }
 
-        // Legacy floating-pill fields: still read from old files, ignored (real pills come later).
+        /// <summary>The taskbar look (one look for every situation).</summary>
+        public StyleProfile DesktopProfile { get; set; }
+
+        /// <summary>Recently used taskbar colors ("#RRGGBB"), newest first.</summary>
+        public List<string> RecentColors { get; set; }
+
+        public int UiTheme { get; set; }           // 0 = follow Windows, 1 = dark, 2 = light
+        public bool LaunchAtStartup { get; set; }  // mirrors the HKCU Run value; not trusted from the file
+        public int RefreshRateMs { get; set; }
+
+        // Unused fields from older versions. Kept so their settings files load and round-trip unchanged.
         public bool FloatingPillEnabled { get; set; }
         public int CornerRadius { get; set; }
         public int HorizontalMargin { get; set; }
         public int VerticalMargin { get; set; }
         public bool DockedWhenMaximized { get; set; }
-
-        // Situation profiles
-        public StyleProfile DesktopProfile { get; set; }
         public bool EnableMaximizedState { get; set; }
         public StyleProfile MaximizedProfile { get; set; }
         public bool EnableStartMenuState { get; set; }
         public StyleProfile StartMenuProfile { get; set; }
         public bool EnableBatterySaverState { get; set; }
         public StyleProfile BatterySaverProfile { get; set; }
+        public bool UILightTheme { get; set; }     // v2 flag, migrated into UiTheme
 
-        // Recently used taskbar colors ("#RRGGBB"), newest first
-        public System.Collections.Generic.List<string> RecentColors { get; set; }
-
-        // App preferences
-        public int UiTheme { get; set; }           // 0 = follow Windows, 1 = dark, 2 = light
-        public bool UILightTheme { get; set; }     // legacy (v2), migrated into UiTheme on load
-        public bool LaunchAtStartup { get; set; }
-        public int RefreshRateMs { get; set; }
         /// <summary>True when Load() found no settings file (first launch).</summary>
         public static bool IsFirstRun { get; private set; }
 
@@ -137,29 +130,9 @@ namespace Opacbar
         {
             ConfigVersion = CurrentVersion;
             Enabled = true;
-
-            FloatingPillEnabled = false;
-            CornerRadius = 16;
-            HorizontalMargin = 8;
-            VerticalMargin = 4;
-            DockedWhenMaximized = true;
-
             DesktopProfile = new StyleProfile(Material.Clear, "#000000", 0);
-
-            // Off by default: the bar going dark on maximize confused people.
-            EnableMaximizedState = false;
-            MaximizedProfile = new StyleProfile(Material.Acrylic, "#101010", 70);
-
-            EnableStartMenuState = false;
-            StartMenuProfile = new StyleProfile(Material.Acrylic, "#101010", 70);
-
-            EnableBatterySaverState = false;
-            BatterySaverProfile = new StyleProfile(Material.Color, "#080808", 100);
-
-            RecentColors = new System.Collections.Generic.List<string>();
-
+            RecentColors = new List<string>();
             UiTheme = 0;
-            UILightTheme = false;
             LaunchAtStartup = false;
             RefreshRateMs = 250;
         }
@@ -169,21 +142,9 @@ namespace Opacbar
         {
             ConfigVersion = o.ConfigVersion;
             Enabled = o.Enabled;
-            FloatingPillEnabled = o.FloatingPillEnabled;
-            CornerRadius = o.CornerRadius;
-            HorizontalMargin = o.HorizontalMargin;
-            VerticalMargin = o.VerticalMargin;
-            DockedWhenMaximized = o.DockedWhenMaximized;
             DesktopProfile = o.DesktopProfile.Clone();
-            EnableMaximizedState = o.EnableMaximizedState;
-            MaximizedProfile = o.MaximizedProfile.Clone();
-            EnableStartMenuState = o.EnableStartMenuState;
-            StartMenuProfile = o.StartMenuProfile.Clone();
-            EnableBatterySaverState = o.EnableBatterySaverState;
-            BatterySaverProfile = o.BatterySaverProfile.Clone();
-            RecentColors = new System.Collections.Generic.List<string>(o.RecentColors ?? new System.Collections.Generic.List<string>());
+            RecentColors = new List<string>(o.RecentColors ?? new List<string>());
             UiTheme = o.UiTheme;
-            UILightTheme = o.UILightTheme;
             LaunchAtStartup = o.LaunchAtStartup;
             RefreshRateMs = o.RefreshRateMs;
         }
@@ -191,18 +152,11 @@ namespace Opacbar
         public void Clamp()
         {
             if (UiTheme < 0 || UiTheme > 2) UiTheme = 0;
-            if (RefreshRateMs < 50) RefreshRateMs = 50;
-            if (RefreshRateMs > 5000) RefreshRateMs = 5000;
-            if (DesktopProfile == null) DesktopProfile = new AppConfig().DesktopProfile;
-            if (MaximizedProfile == null) MaximizedProfile = new AppConfig().MaximizedProfile;
-            if (StartMenuProfile == null) StartMenuProfile = new AppConfig().StartMenuProfile;
-            if (BatterySaverProfile == null) BatterySaverProfile = new AppConfig().BatterySaverProfile;
+            RefreshRateMs = Math.Max(50, Math.Min(5000, RefreshRateMs));
+            if (DesktopProfile == null) DesktopProfile = new StyleProfile();
             DesktopProfile.Clamp();
-            MaximizedProfile.Clamp();
-            StartMenuProfile.Clamp();
-            BatterySaverProfile.Clamp();
 
-            System.Collections.Generic.List<string> clean = new System.Collections.Generic.List<string>();
+            List<string> clean = new List<string>();
             if (RecentColors != null)
             {
                 foreach (string c in RecentColors)
@@ -213,47 +167,40 @@ namespace Opacbar
             }
             RecentColors = clean;
         }
-        // ---- Storage ---------------------------------------------------------------
 
-        private static string ExeDirectory()
-        {
-            return AppDomain.CurrentDomain.BaseDirectory;
-        }
+        // ---- Storage ---------------------------------------------------------------
 
         /// <summary>Portable mode is on only when a file named "portable" sits next to the exe.</summary>
         public static bool IsPortable()
         {
-            try { return File.Exists(Path.Combine(ExeDirectory(), "portable")); }
+            try { return File.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "portable")); }
             catch { return false; }
         }
 
         public static string GetConfigPath()
         {
-            if (IsPortable())
-            {
-                return Path.Combine(ExeDirectory(), "settings.json");
-            }
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Opacbar");
-            return Path.Combine(dir, "settings.json");
+            if (IsPortable()) return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "settings.json");
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Opacbar", "settings.json");
         }
 
         public static AppConfig Load()
         {
             AppConfig result = null;
-            IsFirstRun = true;
-            try
+            string path = GetConfigPath();
+            IsFirstRun = !File.Exists(path);
+            if (!IsFirstRun)
             {
-                string path = GetConfigPath();
-                if (File.Exists(path))
+                try
                 {
-                    IsFirstRun = false;
-                    JavaScriptSerializer serializer = new JavaScriptSerializer();
-                    result = serializer.Deserialize<AppConfig>(File.ReadAllText(path));
+                    result = new JavaScriptSerializer().Deserialize<AppConfig>(File.ReadAllText(path));
                 }
-            }
-            catch
-            {
-                result = null;
+                catch (Exception ex)
+                {
+                    // Keep the unreadable file for the user instead of silently overwriting it.
+                    Diagnostics.Log("settings unreadable (" + ex.Message + "); using defaults");
+                    try { File.Copy(path, path + ".bad", true); } catch { }
+                    result = null;
+                }
             }
 
             if (result == null)
@@ -264,20 +211,16 @@ namespace Opacbar
             {
                 if (result.ConfigVersion < 3)
                 {
-                    // v2 -> v3: boolean light theme flag became the UiTheme choice.
+                    // v2 -> v3: the boolean light theme flag became the UiTheme choice.
                     if (result.UILightTheme) result.UiTheme = 2;
                     result.UILightTheme = false;
-                    result.ConfigVersion = CurrentVersion;
                 }
-                if (result.ConfigVersion < 4)
+                if (result.ConfigVersion < 4 && result.DesktopProfile != null)
                 {
                     // v3 -> v4: Mode/Luminance became Material/Color.
-                    if (result.DesktopProfile != null) result.DesktopProfile.MigrateFromLegacy();
-                    if (result.MaximizedProfile != null) result.MaximizedProfile.MigrateFromLegacy();
-                    if (result.StartMenuProfile != null) result.StartMenuProfile.MigrateFromLegacy();
-                    if (result.BatterySaverProfile != null) result.BatterySaverProfile.MigrateFromLegacy();
-                    result.ConfigVersion = CurrentVersion;
+                    result.DesktopProfile.MigrateFromLegacy();
                 }
+                result.ConfigVersion = CurrentVersion;
                 result.Clamp();
             }
 
@@ -285,6 +228,7 @@ namespace Opacbar
             return result;
         }
 
+        /// <summary>Writes the settings file (via a temp file, retried briefly if it is locked) and syncs the startup entry.</summary>
         public bool Save(out string error)
         {
             error = null;
@@ -293,15 +237,35 @@ namespace Opacbar
                 Clamp();
                 string path = GetConfigPath();
                 string dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-
-                JavaScriptSerializer serializer = new JavaScriptSerializer();
-                string json = FormatJson(serializer.Serialize(this));
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                string json = FormatJson(new JavaScriptSerializer().Serialize(this));
                 string tmp = path + ".tmp";
-                File.WriteAllText(tmp, json, new UTF8Encoding(false));
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(tmp, path);
-                SetStartup(this.LaunchAtStartup);
+
+                for (int attempt = 0; ; attempt++)
+                {
+                    try
+                    {
+                        File.WriteAllText(tmp, json, new UTF8Encoding(false));
+                        if (!File.Exists(path)) File.Move(tmp, path);
+                        else
+                        {
+                            try { File.Replace(tmp, path, null, true); }
+                            catch (IOException)
+                            {
+                                // File systems without Replace support: plain overwrite.
+                                File.Copy(tmp, path, true);
+                                File.Delete(tmp);
+                            }
+                        }
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (attempt >= 4 || !(ex is IOException || ex is UnauthorizedAccessException)) throw;
+                        Thread.Sleep(60); // locked by a scanner or sync tool for a moment
+                    }
+                }
+                SetStartup(LaunchAtStartup);
                 return true;
             }
             catch (Exception ex)
@@ -312,9 +276,10 @@ namespace Opacbar
         }
 
         // ---- Start with Windows ------------------------------------------------------
+        // The installer writes the same value (installer/Opacbar.iss): HKCU Run, "Opacbar" = "\"<exe>\" --minimized".
 
         private const string RunRegistryPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-        private const string AppRegistryName = "Opacbar";
+        private const string RunValueName = "Opacbar";
 
         public static bool IsStartupEnabled()
         {
@@ -322,7 +287,7 @@ namespace Opacbar
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunRegistryPath, false))
                 {
-                    if (key != null) return key.GetValue(AppRegistryName) != null;
+                    if (key != null) return key.GetValue(RunValueName) != null;
                 }
             }
             catch { }
@@ -340,13 +305,13 @@ namespace Opacbar
                     {
                         string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
                         string wanted = "\"" + exePath + "\" --minimized";
-                        object cur = key.GetValue(AppRegistryName);
+                        object cur = key.GetValue(RunValueName);
                         if (cur == null || !string.Equals(cur.ToString(), wanted, StringComparison.OrdinalIgnoreCase))
-                            key.SetValue(AppRegistryName, wanted);
+                            key.SetValue(RunValueName, wanted);
                     }
-                    else if (key.GetValue(AppRegistryName) != null)
+                    else if (key.GetValue(RunValueName) != null)
                     {
-                        key.DeleteValue(AppRegistryName, false);
+                        key.DeleteValue(RunValueName, false);
                     }
                 }
             }
@@ -402,8 +367,7 @@ namespace Opacbar
                         break;
                     case ':':
                         sb.Append(ch);
-                        if (!quoted)
-                            sb.Append(" ");
+                        if (!quoted) sb.Append(" ");
                         break;
                     default:
                         sb.Append(ch);
@@ -413,6 +377,59 @@ namespace Opacbar
             return sb.ToString();
         }
     }
+
+    /// <summary>
+    /// Saves the shared AppConfig: immediately for discrete changes, after a short pause for
+    /// continuous input (slider and picker drags). A failed save is retried until it succeeds,
+    /// and Flush() is called on every hide, quit and session end.
+    /// </summary>
+    public sealed class ConfigSaver : IDisposable
+    {
+        private readonly AppConfig _config;
+        private readonly System.Windows.Forms.Timer _timer = new System.Windows.Forms.Timer();
+        private bool _dirty;
+
+        public ConfigSaver(AppConfig config)
+        {
+            _config = config;
+            _timer.Interval = 400;
+            _timer.Tick += delegate { Flush(); };
+        }
+
+        /// <summary>Discrete change (click, toggle, menu): write now.</summary>
+        public void SaveNow()
+        {
+            _dirty = true;
+            Flush();
+        }
+
+        /// <summary>Continuous change (drag): write once the input pauses.</summary>
+        public void SaveSoon()
+        {
+            _dirty = true;
+            _timer.Stop();
+            _timer.Start();
+        }
+
+        /// <summary>Writes any pending change now.</summary>
+        public void Flush()
+        {
+            _timer.Stop();
+            if (!_dirty) return;
+            string err;
+            if (_config.Save(out err))
+            {
+                _dirty = false;
+                return;
+            }
+            Diagnostics.Log("settings save failed: " + err);
+            _timer.Start(); // retry shortly
+        }
+
+        public void Dispose()
+        {
+            Flush();
+            _timer.Dispose();
+        }
+    }
 }
-
-

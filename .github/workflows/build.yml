@@ -44,10 +44,14 @@ jobs:
             $obj = "obj_$($t.arch)"
             New-Item -ItemType Directory -Force $obj | Out-Null
             $dll = "dist\OpacbarTAP.$($t.arch).dll"
+            # C++/WinRT (blur brush) comes from the Windows SDK (include\<ver>\cppwinrt, on the
+            # vcvars INCLUDE path). Explicit system libs first, windowsapp.lib last so it only
+            # supplies the WinRT core imports; dxguid.lib = D2D1 effect CLSIDs (static data).
             $cmd = "`"$vcvars`" $($t.vc) >nul && " +
-                   "cl /nologo /LD /O2 /EHs-c- /D_HAS_EXCEPTIONS=0 /GS /guard:cf /W4 /DUNICODE /D_UNICODE " +
+                   "cl /nologo /LD /O2 /std:c++17 /EHsc /permissive- /bigobj /GS /guard:cf /W4 /DUNICODE /D_UNICODE " +
                    "/Fo$obj\ native\OpacbarTAP.cpp /Fe:$dll " +
-                   "/link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT ole32.lib oleaut32.lib user32.lib && " +
+                   "/link /DEF:native\OpacbarTAP.def /GUARD:CF /DYNAMICBASE /NXCOMPAT " +
+                   "kernel32.lib ole32.lib oleaut32.lib user32.lib dxguid.lib windowsapp.lib && " +
                    "dumpbin /nologo /headers $dll > $obj\headers.txt && " +
                    "dumpbin /nologo /exports $dll > $obj\exports.txt"
             cmd /c $cmd
@@ -69,10 +73,22 @@ jobs:
           ./build.ps1
           if (-not (Test-Path "dist/Opacbar.exe")) { throw "dist/Opacbar.exe was not generated!" }
 
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Installing Inno Setup failed" }
+          }
+          & $iscc /Q installer\Opacbar.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path "dist/OpacbarSetup.exe")) { throw "dist/OpacbarSetup.exe was not generated!" }
+
       - name: Checksums and portable ZIP
         shell: pwsh
         run: |
-          $files = "Opacbar.exe", "OpacbarTAP.x64.dll", "OpacbarTAP.arm64.dll"
+          $files = "OpacbarSetup.exe", "Opacbar.exe", "OpacbarTAP.x64.dll", "OpacbarTAP.arm64.dll"
           foreach ($f in $files) {
             if (-not (Test-Path "dist/$f")) { throw "dist/$f is missing!" }
           }
@@ -106,10 +122,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $notes = "Automatic build of commit ${{ github.sha }}. Download Opacbar-Windows-Portable.zip, unzip, run Opacbar.exe."
+          $notes = "Automatic build of commit ${{ github.sha }}. Recommended: run OpacbarSetup.exe (installs for your account, no admin). Portable: unzip Opacbar-Windows-Portable.zip and run Opacbar.exe."
           gh release delete latest-build --yes --cleanup-tag 2>$null
           gh release create latest-build --prerelease --title "Latest build" --notes $notes --target ${{ github.sha }} `
-            dist/Opacbar-Windows-Portable.zip dist/SHA256SUMS.txt
+            dist/OpacbarSetup.exe dist/Opacbar-Windows-Portable.zip dist/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "Creating the Latest build release failed" }
 
       - name: Publish GitHub Release (on version tags)
@@ -117,6 +133,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
+            dist/OpacbarSetup.exe
             dist/Opacbar.exe
             dist/OpacbarTAP.x64.dll
             dist/OpacbarTAP.arm64.dll

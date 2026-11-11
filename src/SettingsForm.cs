@@ -1,7 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
-using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace Opacbar
@@ -16,20 +16,18 @@ namespace Opacbar
         private const int CS_DROPSHADOW = 0x00020000;
         private const int WS_EX_TOOLWINDOW = 0x00000080;
 
-        private static readonly Material[] Materials = new Material[]
-        {
-            Material.Clear, Material.Color, Material.Blur
-        };
-        private static int _lastTab;
+        private static readonly Material[] Styles = new Material[] { Material.Clear, Material.Color, Material.Blur };
 
         private readonly AppConfig _config;
         private readonly TaskbarEngine _engine;
-        private readonly Timer _saveTimer = new Timer();
+        private readonly ConfigSaver _saver;
         private readonly Timer _statusTimer = new Timer();
 
-        private bool _syncing;
-        private bool _dragging;
-        private bool _suppressHide;
+        private bool _syncing;        // pushing config into controls: their change events must not commit
+        private bool _dragging;       // moving the window by its header
+        private bool _suppressHide;   // a dialog or another app is opening on purpose
+        private bool _pickerOpen;
+        private DateTime _restartClickedUtc = DateTime.MinValue;
 
         // Layout
         private StackPanel _root;
@@ -38,43 +36,32 @@ namespace Opacbar
         private FlatButton _restartBtn;
         private SegmentedControl _tabs;
         private StackPanel _pageLook, _pageGeneral;
-        private DateTime _restartClickedUtc = DateTime.MinValue;
-        private TextBlock _situationHint;
-
-        private static string SituationHint(int index)
-        {
-            switch (index)
-            {
-                case 1: return "Used while an app is maximized or full screen.";
-                case 2: return "Used while the Start menu or Search is open.";
-                case 3: return "Used while Windows battery saver is on.";
-                default: return "Your everyday taskbar look.";
-            }
-        }
-        private bool _pickerOpen;
 
         // Look
-        private SegmentedControl _situation, _style;
-        private Row _useDifferent, _topLine;
+        private SegmentedControl _style;
         private ColorSwatchRow _colorRow;
         private ColorPickerPanel _picker;
         private LabeledSlider _opacity;
+        private LabeledSlider _blurAmount;
         private TextBlock _hint;
+        private Row _topLine;
 
         // General
-        private Row _startup, _themeRow;
+        private Row _startup;
         private SegmentedControl _themeSeg;
         private TextBlock _mapNote;
+
         public event EventHandler ConfigChanged;
         public event EventHandler QuitRequested;
 
         /// <summary>UTC time the flyout last hid itself (guards the tray click that caused the hide).</summary>
         public DateTime LastHideUtc { get; private set; }
 
-        public SettingsForm(AppConfig config, TaskbarEngine engine)
+        public SettingsForm(AppConfig config, TaskbarEngine engine, ConfigSaver saver)
         {
             _config = config;
             _engine = engine;
+            _saver = saver;
 
             AutoScaleMode = AutoScaleMode.None;
             FormBorderStyle = FormBorderStyle.None;
@@ -86,14 +73,12 @@ namespace Opacbar
             Text = "Opacbar";
             BackColor = Theme.Surface;
 
-            _saveTimer.Interval = 300;
-            _saveTimer.Tick += delegate { FlushSave(); };
             _statusTimer.Interval = 1000;
             _statusTimer.Tick += delegate { RefreshStatus(); };
 
             BuildUi();
 
-            if (_engine != null) _engine.StateUpdated += OnEngineStateUpdated;
+            _engine.StateUpdated += OnEngineStateUpdated;
             Theme.SetDpi(UiNative.SystemDpi());
             SyncControlsFromConfig();
         }
@@ -109,7 +94,7 @@ namespace Opacbar
             }
         }
 
-        protected override bool ShowWithoutActivation { get { return false; } }
+        private StyleProfile Look { get { return _config.DesktopProfile; } }
 
         // ---- UI construction --------------------------------------------------------
 
@@ -131,17 +116,15 @@ namespace Opacbar
             _restartBtn = new FlatButton("Restart Explorer now") { Visible = false, Primary = true };
             _restartBtn.Click += delegate
             {
-                if (_engine == null) return;
                 _restartClickedUtc = DateTime.UtcNow;
                 _restartBtn.Enabled = false;
                 _engine.RestartExplorer();
             };
 
             _tabs = new SegmentedControl("Look", "General");
-            _tabs.SelectedIndex = Math.Max(0, Math.Min(1, _lastTab));
+            _tabs.SelectedIndex = 0;
             _tabs.SelectedIndexChanged += delegate
             {
-                _lastTab = _tabs.SelectedIndex;
                 ShowPage();
                 Relayout();
             };
@@ -168,43 +151,22 @@ namespace Opacbar
         {
             StackPanel p = NewPage();
 
-            _situation = new SegmentedControl("Normal", "App full", "Start open", "Battery");
-            _situation.SelectedIndex = 0;
-            _situationHint = new TextBlock(SituationHint(0));
-            _situation.SelectedIndexChanged += delegate
-            {
-                _situationHint.TextValue = SituationHint(_situation.SelectedIndex);
-                SyncControlsFromConfig();
-                if (IsHandleCreated) Relayout();
-            };
-
-            ToggleSwitch useTog = new ToggleSwitch();
-            _useDifferent = new Row("Use a different look", useTog);
-            useTog.CheckedChanged += delegate
-            {
-                if (_syncing) return;
-                SetSituationEnabled(_situation.SelectedIndex, useTog.Checked);
-                UpdateEnabledStates();
-                Commit();
-            };
-
             _style = new SegmentedControl("Clear", "Color", "Blur");
             _style.SelectedIndexChanged += delegate
             {
                 if (_syncing) return;
                 int i = _style.SelectedIndex;
-                if (i < 0 || i >= Materials.Length) return;
-                StyleProfile cp = CurrentProfile();
-                cp.Material = Materials[i];
-                if (IsTinted(cp.Material) && cp.Opacity < 10)
+                if (i < 0 || i >= Styles.Length) return;
+                Look.Material = Styles[i];
+                if (Look.Material != Material.Clear && Look.Opacity < 10)
                 {
                     // Coming from Clear: start at a visible opacity instead of an invisible one.
-                    cp.Opacity = 60;
+                    Look.Opacity = 60;
                     _syncing = true;
-                    _opacity.Value = cp.Opacity;
+                    _opacity.Value = Look.Opacity;
                     _syncing = false;
                 }
-                UpdateEnabledStates();
+                UpdateVisibility();
                 Commit();
             };
 
@@ -212,18 +174,17 @@ namespace Opacbar
             _colorRow.Clicked += delegate
             {
                 _pickerOpen = !_pickerOpen;
-                UpdateEnabledStates();
+                UpdateVisibility();
             };
 
             _picker = new ColorPickerPanel();
-            _picker.Recents = _config.RecentColors;
             _picker.ColorChanged += delegate
             {
                 if (_syncing) return;
                 Color c = _picker.Value;
-                CurrentProfile().Color = ColorMath.Hex(c);
+                Look.Color = ColorMath.Hex(c);
                 _colorRow.Value = c;
-                CommitLight(); // live apply while dragging
+                CommitDrag();
             };
             _picker.ColorCommitted += delegate
             {
@@ -238,8 +199,17 @@ namespace Opacbar
             _opacity.ValueChanged += delegate
             {
                 if (_syncing) return;
-                CurrentProfile().Opacity = _opacity.Value;
-                CommitLight();
+                Look.Opacity = _opacity.Value;
+                CommitDrag();
+            };
+
+            _blurAmount = new LabeledSlider("Blur amount", 0, 100);
+            _blurAmount.Format = delegate(int v) { return v + "%"; };
+            _blurAmount.ValueChanged += delegate
+            {
+                if (_syncing) return;
+                Look.BlurAmount = _blurAmount.Value;
+                CommitDrag();
             };
 
             _hint = new TextBlock("Needs Windows transparency effects on") { Visible = false };
@@ -249,32 +219,95 @@ namespace Opacbar
             lineTog.CheckedChanged += delegate
             {
                 if (_syncing) return;
-                CurrentProfile().HideTopLine = lineTog.Checked;
+                Look.HideTopLine = lineTog.Checked;
                 Commit();
             };
 
-            // One look for all situations: the situation picker is intentionally not shown
-            // (_situation stays at index 0 = the everyday profile).
             p.Controls.Add(new SectionHeader("Style"));
             p.Controls.Add(_style);
             p.Controls.Add(_colorRow);
             p.Controls.Add(_picker);
+            p.Controls.Add(_blurAmount);
             p.Controls.Add(_opacity);
             p.Controls.Add(_hint);
             p.Controls.Add(_topLine);
             return p;
         }
 
-        private static bool IsTinted(Material m)
+        private StackPanel BuildGeneralPage()
         {
-            return m == Material.Color || m == Material.Blur || m == Material.Acrylic;
+            StackPanel p = NewPage();
+            p.Gap = Theme.Space2;
+
+            ToggleSwitch startTog = new ToggleSwitch();
+            _startup = new Row("Start with Windows", startTog);
+            startTog.CheckedChanged += delegate
+            {
+                if (_syncing) return;
+                _config.LaunchAtStartup = startTog.Checked;
+                Commit();
+            };
+
+            _themeSeg = new SegmentedControl("System", "Dark", "Light");
+            _themeSeg.LogicalWidth = 200;
+            Row themeRow = new Row("Theme", _themeSeg);
+            _themeSeg.SelectedIndexChanged += delegate
+            {
+                if (_syncing || _themeSeg.SelectedIndex < 0) return;
+                _config.UiTheme = _themeSeg.SelectedIndex;
+                Theme.Apply(_config.UiTheme);
+                OnThemeChanged();
+                Commit();
+            };
+
+            FlatButton open = new FlatButton("Open settings file");
+            open.Click += delegate { OpenSettingsFile(); };
+
+            FlatButton reset = new FlatButton("Reset to defaults");
+            reset.Click += delegate { ResetDefaults(); };
+
+            FlatButton quit = new FlatButton("Quit and restore taskbar");
+            quit.Danger = true;
+            quit.Click += delegate
+            {
+                EventHandler h = QuitRequested;
+                if (h != null) h(this, EventArgs.Empty);
+            };
+
+            TextBlock footer = new TextBlock("Open source · no network · no admin\nEmergency quit: Ctrl+Shift+Alt+Q");
+            footer.Small = true;
+            footer.Center = true;
+
+            p.Controls.Add(_startup);
+            p.Controls.Add(themeRow);
+            p.Controls.Add(new SectionHeader("Settings"));
+            p.Controls.Add(open);
+            p.Controls.Add(reset);
+            if (Diagnostics.Enabled)
+            {
+                FlatButton map = new FlatButton("Save taskbar map...");
+                map.Click += delegate { SaveTaskbarMap(); };
+                _mapNote = new TextBlock("") { Visible = false };
+                p.Controls.Add(new SectionHeader("Diagnostics"));
+                p.Controls.Add(map);
+                p.Controls.Add(_mapNote);
+            }
+            p.Controls.Add(quit);
+            p.Controls.Add(footer);
+            return p;
+        }
+
+        private void ShowPage()
+        {
+            _pageLook.Visible = _tabs.SelectedIndex == 0;
+            _pageGeneral.Visible = _tabs.SelectedIndex == 1;
         }
 
         private void AddRecentColor(string hex)
         {
             string n = TaskbarStyle.NormalizeHex(hex);
             if (n == null) return;
-            if (_config.RecentColors == null) _config.RecentColors = new System.Collections.Generic.List<string>();
+            if (_config.RecentColors == null) _config.RecentColors = new List<string>();
             _config.RecentColors.RemoveAll(delegate(string s) { return string.Equals(s, n, StringComparison.OrdinalIgnoreCase); });
             _config.RecentColors.Insert(0, n);
             while (_config.RecentColors.Count > AppConfig.MaxRecentColors)
@@ -300,105 +333,8 @@ namespace Opacbar
             catch { }
             return true;
         }
-        private StackPanel BuildGeneralPage()
-        {
-            StackPanel p = NewPage();
-            p.Gap = Theme.Space2;
 
-            ToggleSwitch startTog = new ToggleSwitch();
-            _startup = new Row("Start with Windows", startTog);
-            startTog.CheckedChanged += delegate
-            {
-                if (_syncing) return;
-                _config.LaunchAtStartup = startTog.Checked;
-                Commit();
-            };
-
-            _themeSeg = new SegmentedControl("System", "Dark", "Light");
-            _themeSeg.LogicalWidth = 200;
-            _themeRow = new Row("Theme", _themeSeg);
-            _themeSeg.SelectedIndexChanged += delegate
-            {
-                if (_syncing || _themeSeg.SelectedIndex < 0) return;
-                _config.UiTheme = _themeSeg.SelectedIndex;
-                Theme.Apply(_config.UiTheme);
-                OnThemeChanged();
-                Commit();
-            };
-
-            FlatButton open = new FlatButton("Open settings file");
-            open.Click += delegate { OpenSettingsFile(); };
-
-            FlatButton reset = new FlatButton("Reset to defaults");
-            reset.Click += delegate { ResetDefaults(); };
-
-            FlatButton quit = new FlatButton("Quit and restore taskbar");
-            quit.Danger = true;
-            quit.Click += delegate
-            {
-                FlushSave();
-                EventHandler h = QuitRequested;
-                if (h != null) h(this, EventArgs.Empty);
-            };
-
-            TextBlock footer = new TextBlock("Open source · no network · no admin\nEmergency quit: Ctrl+Shift+Alt+Q");
-            footer.Small = true;
-            footer.Center = true;
-
-            FlatButton map = new FlatButton("Save taskbar map...");
-            map.Click += delegate { SaveTaskbarMap(); };
-            _mapNote = new TextBlock("") { Visible = false };
-
-            p.Controls.Add(_startup);
-            p.Controls.Add(_themeRow);
-            p.Controls.Add(new SectionHeader("Settings"));
-            p.Controls.Add(open);
-            p.Controls.Add(reset);
-            p.Controls.Add(new SectionHeader("Developer"));
-            p.Controls.Add(map);
-            p.Controls.Add(_mapNote);
-            p.Controls.Add(quit);
-            p.Controls.Add(footer);
-            return p;
-        }
-        private void ShowPage()
-        {
-            _pageLook.Visible = _tabs.SelectedIndex == 0;
-            _pageGeneral.Visible = _tabs.SelectedIndex == 1;
-        }
         // ---- Config <-> controls ----------------------------------------------------
-
-        private StyleProfile CurrentProfile()
-        {
-            switch (_situation.SelectedIndex)
-            {
-                case 1: return _config.MaximizedProfile;
-                case 2: return _config.StartMenuProfile;
-                case 3: return _config.BatterySaverProfile;
-                default: return _config.DesktopProfile;
-            }
-        }
-
-        private bool GetSituationEnabled(int idx)
-        {
-            switch (idx)
-            {
-                case 1: return _config.EnableMaximizedState;
-                case 2: return _config.EnableStartMenuState;
-                case 3: return _config.EnableBatterySaverState;
-                default: return true;
-            }
-        }
-
-        private void SetSituationEnabled(int idx, bool v)
-        {
-            switch (idx)
-            {
-                case 1: _config.EnableMaximizedState = v; break;
-                case 2: _config.EnableStartMenuState = v; break;
-                case 3: _config.EnableBatterySaverState = v; break;
-            }
-        }
 
         /// <summary>Pushes the current config into every control (no events leak back).</summary>
         public void SyncControlsFromConfig()
@@ -408,19 +344,14 @@ namespace Opacbar
             try
             {
                 _header.Toggle.Checked = _config.Enabled;
-
-                int idx = Math.Max(0, _situation.SelectedIndex);
-                StyleProfile p = CurrentProfile();
-                ((ToggleSwitch)_useDifferent.Trailing).Checked = GetSituationEnabled(idx);
-                // Acrylic and Windows were merged into Blur (all three are Windows' own frosted taskbar now).
-                Material shown = (p.Material == Material.Acrylic || p.Material == Material.Windows) ? Material.Blur : p.Material;
-                _style.SelectedIndex = Array.IndexOf(Materials, shown);
-                _opacity.Value = p.Opacity;
-                Color pc = ColorMath.Parse(p.Color, Color.Black);
+                _style.SelectedIndex = Array.IndexOf(Styles, Look.Material);
+                _opacity.Value = Look.Opacity;
+                _blurAmount.Value = Look.BlurAmount;
+                Color pc = ColorMath.Parse(Look.Color, Color.Black);
                 _picker.Recents = _config.RecentColors;
                 _picker.Value = pc;
                 _colorRow.Value = pc;
-                ((ToggleSwitch)_topLine.Trailing).Checked = p.HideTopLine;
+                ((ToggleSwitch)_topLine.Trailing).Checked = Look.HideTopLine;
                 ((ToggleSwitch)_startup.Trailing).Checked = _config.LaunchAtStartup;
                 _themeSeg.SelectedIndex = _config.UiTheme;
             }
@@ -428,33 +359,25 @@ namespace Opacbar
             {
                 _syncing = was;
             }
-            UpdateEnabledStates();
+            UpdateVisibility();
             RefreshStatus();
             Relayout();
         }
 
-        private void UpdateEnabledStates()
+        private void UpdateVisibility()
         {
-            int idx = Math.Max(0, _situation.SelectedIndex);
-            _useDifferent.Visible = idx > 0;
-            bool look = idx == 0 || GetSituationEnabled(idx);
-            Material m = CurrentProfile().Material;
-            bool tinted = IsTinted(m);
+            bool blur = Look.Material == Material.Blur;
+            bool colored = Look.Material != Material.Clear;   // Blur: color + tint color the blur
 
-            _style.Enabled = look;
-            bool blurry = m == Material.Blur || m == Material.Acrylic || m == Material.Windows;
-            bool colored = m == Material.Color;   // Windows' own blur can't be tinted or weakened
             _colorRow.Visible = colored;
-            _colorRow.Enabled = look;
             _colorRow.Expanded = _pickerOpen;
-            _picker.Visible = colored && look && _pickerOpen;
-            _opacity.Label = "Opacity";
+            _picker.Visible = colored && _pickerOpen;
+            _opacity.Label = blur ? "Tint" : "Opacity";
             _opacity.Visible = colored;
-            _opacity.Enabled = look;
-            _topLine.Enabled = look;
+            _blurAmount.Visible = blur;
 
-            _hint.Visible = blurry;
-            if (blurry)
+            _hint.Visible = blur;
+            if (blur)
             {
                 bool off = !TransparencyEnabled();
                 _hint.Dot = off ? (Color?)Theme.Warning : null;
@@ -463,35 +386,28 @@ namespace Opacbar
             if (IsHandleCreated) Relayout();
         }
 
+        /// <summary>A discrete change (click, toggle, swatch, typed color): apply and save now.</summary>
         private void Commit()
         {
             if (_syncing) return;
-            if (_engine != null) _engine.UpdateConfig(_config);
-            _saveTimer.Stop();
-            _saveTimer.Start();
+            _saver.SaveNow();
+            _engine.ConfigChanged();
             RefreshStatus();
             EventHandler h = ConfigChanged;
             if (h != null) h(this, EventArgs.Empty);
         }
 
-        /// <summary>Cheap commit for continuous input (dragging): updates the taskbar and schedules a save only.</summary>
-        private void CommitLight()
+        /// <summary>Continuous input (slider or picker drag): apply live, save once the input pauses.</summary>
+        private void CommitDrag()
         {
             if (_syncing) return;
-            if (_engine != null) _engine.UpdateConfig(_config);
-            _saveTimer.Stop();
-            _saveTimer.Start();
-        }
-        private void FlushSave()
-        {
-            _saveTimer.Stop();
-            string err;
-            _config.Save(out err);
+            _engine.ConfigChanged();
+            _saver.SaveSoon();
         }
 
         // ---- Status -----------------------------------------------------------------
 
-        private void OnEngineStateUpdated(DynamicActivityState state, int count)
+        private void OnEngineStateUpdated()
         {
             if (IsDisposed || !IsHandleCreated) return;
             if (InvokeRequired) BeginInvoke(new Action(RefreshStatus));
@@ -500,9 +416,9 @@ namespace Opacbar
 
         private void RefreshStatus()
         {
-            if (IsDisposed || _engine == null) return;
+            if (IsDisposed) return;
 
-            string text;
+            string text = "Active";
             Color dot = Theme.Success;
             string note = null;
             Color noteColor = Theme.Warning;
@@ -513,51 +429,45 @@ namespace Opacbar
                 text = "Off";
                 dot = Theme.TextDisabled;
             }
-            else if (health == EngineHealth.Paused)
-            {
-                text = "Paused";
-                dot = Theme.TextSecondary;
-            }
-            else if (health == EngineHealth.NoTaskbar)
-            {
-                text = "No taskbar found";
-                dot = Theme.Warning;
-                note = _engine.HealthDetail;
-            }
-            else if (health == EngineHealth.HelperMissing)
-            {
-                text = "Helper missing";
-                dot = Theme.Warning;
-                note = _engine.HealthDetail;
-            }
-            else if (health == EngineHealth.Connecting)
-            {
-                text = "Connecting to the taskbar...";
-                dot = Theme.Warning;
-                note = _engine.HealthDetail;
-            }
-            else if (health == EngineHealth.HelperOutdated)
-            {
-                text = "One quick restart needed";
-                dot = Theme.Warning;
-                note = _engine.HealthDetail;
-            }
-            else if (health == EngineHealth.HelperFailed)
-            {
-                text = "Helper failed";
-                dot = Theme.Error;
-                noteColor = Theme.Error;
-                note = _engine.HealthDetail;
-            }
             else
             {
-                switch (_engine.CurrentState)
+                switch (health)
                 {
-                    case DynamicActivityState.Disabled: text = "Off"; dot = Theme.TextDisabled; break;
-                    default: text = "Active"; break;
+                    case EngineHealth.Paused:
+                        text = "Paused";
+                        dot = Theme.TextSecondary;
+                        break;
+                    case EngineHealth.NoTaskbar:
+                        text = "No taskbar found";
+                        dot = Theme.Warning;
+                        note = _engine.HealthDetail;
+                        break;
+                    case EngineHealth.HelperMissing:
+                        text = "Helper missing";
+                        dot = Theme.Warning;
+                        note = _engine.HealthDetail;
+                        break;
+                    case EngineHealth.Connecting:
+                        text = "Connecting to the taskbar...";
+                        dot = Theme.Warning;
+                        note = _engine.HealthDetail;
+                        break;
+                    case EngineHealth.HelperOutdated:
+                        text = "One quick restart needed";
+                        dot = Theme.Warning;
+                        note = _engine.HealthDetail;
+                        break;
+                    case EngineHealth.HelperFailed:
+                        text = "Helper failed";
+                        dot = Theme.Error;
+                        noteColor = Theme.Error;
+                        note = _engine.HealthDetail;
+                        break;
+                    default:
+                        int n = _engine.ActiveTaskbarCount;
+                        if (n > 1) text += " · " + n + " taskbars";
+                        break;
                 }
-                int n = _engine.ActiveTaskbarCount;
-                if (n > 1 && dot == Theme.Success) text += " · " + n + " taskbars";
             }
 
             _header.SetStatus(text, dot);
@@ -577,29 +487,17 @@ namespace Opacbar
 
         // ---- Layout / sizing --------------------------------------------------------
 
-        /// <summary>Recomputes content height and resizes the window, keeping its bottom edge fixed.</summary>
+        /// <summary>Recomputes content height and resizes the window, keeping its bottom-right corner fixed.</summary>
         private void Relayout()
         {
-
             int w = Theme.Px(Theme.FlyoutWidth);
-            int inner = w - 2;
-            int h = _root.GetPreferredHeight(inner) + 2;
-            h = Math.Min(h, MaxHeight());
+            int h = Math.Min(_root.GetPreferredHeight(w - 2) + 2, MaxHeight());
 
-            if (Visible)
-            {
-                int bottom = Bottom;
-                int right = Right;
-                SetBounds(right - w, bottom - h, w, h);
-            }
-            else
-            {
-                Size = new Size(w, h);
-            }
+            if (Visible) SetBounds(Right - w, Bottom - h, w, h);
+            else Size = new Size(w, h);
             _root.SetBounds(1, 1, w - 2, h - 2);
             _root.PerformLayout();
             Invalidate(true);
-
         }
 
         private int MaxHeight()
@@ -614,7 +512,7 @@ namespace Opacbar
             return Math.Max(Theme.Px(200), max);
         }
 
-        private void PlaceAboveTray(int dpi)
+        private void PlaceAboveTray()
         {
             Rectangle wa = Screen.FromPoint(Cursor.Position).WorkingArea;
             int gap = Theme.Px(Theme.FlyoutEdgeGap);
@@ -627,13 +525,12 @@ namespace Opacbar
 
         public void ShowFlyout()
         {
-            Point cur = Cursor.Position;
-            int dpi = UiNative.DpiForPoint(cur);
+            int dpi = UiNative.DpiForPoint(Cursor.Position);
             Theme.SetDpi(dpi);
             Theme.Apply(_config.UiTheme);
             BackColor = Theme.Surface;
             SyncControlsFromConfig();
-            PlaceAboveTray(dpi);
+            PlaceAboveTray();
 
             _suppressHide = false;
             Show();
@@ -642,7 +539,7 @@ namespace Opacbar
             {
                 Theme.SetDpi(actual);
                 Relayout();
-                PlaceAboveTray(actual);
+                PlaceAboveTray();
             }
             Activate();
             UiNative.SetForegroundWindow(Handle);
@@ -655,7 +552,7 @@ namespace Opacbar
             _statusTimer.Stop();
             LastHideUtc = DateTime.UtcNow;
             Hide();
-            if (_saveTimer.Enabled) FlushSave();
+            _saver.Flush();
         }
 
         public void OnThemeChanged()
@@ -731,8 +628,7 @@ namespace Opacbar
         {
             if (disposing)
             {
-                if (_engine != null) _engine.StateUpdated -= OnEngineStateUpdated;
-                _saveTimer.Dispose();
+                _engine.StateUpdated -= OnEngineStateUpdated;
                 _statusTimer.Dispose();
             }
             base.Dispose(disposing);
@@ -742,7 +638,7 @@ namespace Opacbar
 
         private void OpenSettingsFile()
         {
-            FlushSave();
+            _saver.Flush();
             string path = AppConfig.GetConfigPath();
             _suppressHide = true;
             try
@@ -757,7 +653,6 @@ namespace Opacbar
 
         private void SaveTaskbarMap()
         {
-            if (_engine == null) return;
             string path, err;
             bool ok = _engine.SaveTaskbarMap(out path, out err);
             _mapNote.Dot = ok ? Theme.Success : Theme.Error;
@@ -800,9 +695,3 @@ namespace Opacbar
         }
     }
 }
-
-
-
-
-
-

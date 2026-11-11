@@ -13,7 +13,7 @@ All messages are sent with `SendMessageTimeout(SMTO_ABORTIFHUNG, 1000 ms)`.
 | Message | wParam | lParam | Returns |
 |---|---|---|---|
 | `WM_APP+0x12` PING | 0 | 0 | `0x0BAC` |
-| `WM_APP+0x15` VERSION | 0 | 0 | protocol version (`3` = v2 rules + STATS + UNLOAD; the first v2 build returned `2` and has neither). v1 helpers return 0. Helpers returning 0 or 2 cannot be unloaded → Explorer restart needed; ≥ 3 → send UNLOAD, then inject the new copy |
+| `WM_APP+0x15` VERSION | 0 | 0 | protocol version (currently `6`). `3` = v2 rules + STATS + UNLOAD, `4` = tree service via IXamlDiagnostics, `5` = exact restore of original brushes, `6` = `@blur:` values; the first v2 build returned `2` and has neither STATS nor UNLOAD. v1 helpers return 0. Helpers returning 0 or 2 cannot be unloaded → Explorer restart needed; ≥ 3 → send UNLOAD, then inject the new copy |
 | `WM_APP+0x11` RESTORE | 0 | 0 | number of properties restored **on the receiving sink's thread**. Undoes every change, rule set becomes empty |
 | `WM_COPYDATA` RULES | sender HWND | `COPYDATASTRUCT{ dwData = 0x4F504143 ('OPAC'), lpData = UTF-16 text, cbData = bytes }` | number of (element, property) pairs currently applied **on the receiving sink's thread** (sum over sinks for a total), or -1 on a bad header / wrong `dwData` / document > 256 KB |
 | `WM_APP+0x14` DUMP | HWND of an Opacbar window | 0 | 1 if the dump was delivered. The helper sends `WM_COPYDATA{ dwData = 0x4F545245 ('OTRE'), UTF-16 text, not NUL-terminated }` to that HWND (synchronously, before returning; the helper waits up to 10 s). Reading every property can take a while: use a longer timeout (e.g. 15 s) for DUMP, or keep pumping messages after a timeout — the `OTRE` message still arrives |
@@ -65,6 +65,21 @@ Segment forms:
 ### Value
 
 - `@clear` — ClearProperty (use the template/style value).
+- `@blur:<radius>:<#AARRGGBB>` (protocol ≥ 6) — an adjustable-strength blur brush made by the helper: a
+  `XamlCompositionBrushBase` whose composition brush is a Gaussian blur of what lies behind the element
+  (`Compositor.CreateBackdropBrush`) with the tint composited on top (same technique as Windhawk's
+  "Windows 11 Taskbar Styler" `WindhawkBlur` brush). Intended for brush properties, typically
+  `Taskbar.TaskbarBackground > *#BackgroundFill\tFill\t@blur:30:#40202020`.
+  - `radius` — blur amount in DIPs (Gaussian standard deviation), decimal, `0`–`100` (larger values are
+    clamped). `0` = no blur: the tint over the unblurred backdrop (radius 0 with a fully transparent tint =
+    clear).
+  - tint — `#AARRGGBB` (or `#RRGGBB` = opaque), straight alpha, drawn over the blur. Optional: `@blur:30`
+    = blur without tint. The tint is also the brush's `FallbackColor` (shown when Windows disables
+    effects, e.g. transparency effects off / battery saver).
+  - optional suffix `:host` (`@blur:30:#40202020:host`) samples the host backdrop
+    (`CreateHostBackdropBrush`, what's behind the window) instead of the in-tree backdrop. Experimental.
+  - Malformed `@blur:` values make the line be ignored. Each element gets its own brush, kept alive by the
+    helper while applied; restore puts the original value back exactly like for XAML values.
 - starts with `<` — XAML, created with `Windows.UI.Xaml.Markup.XamlReader.Load`. The helper injects
   `xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"` and `xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"`
   into the root element if missing. Example:

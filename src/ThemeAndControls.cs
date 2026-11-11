@@ -92,7 +92,6 @@ namespace Opacbar
         public const int Space2 = 8;
         public const int Space3 = 12;
         public const int Space4 = 16;
-        public const int Space6 = 24;
 
         // Radii (logical px)
         public const int RadiusControl = 6;
@@ -115,8 +114,6 @@ namespace Opacbar
                             TrackOff, OnFill, OnFillText, Success, Warning, Error;
 
         public static bool Dark { get; private set; }
-
-        public static event Action Changed;
 
         private static float _scale = 1f;
         private static string _family;
@@ -215,8 +212,6 @@ namespace Opacbar
                 Warning = Color.FromArgb(0x9A, 0x67, 0x00);
                 Error = Color.FromArgb(0xCF, 0x22, 0x2E);
             }
-            Action h = Changed;
-            if (h != null) h();
         }
 
         public static Color Mix(Color a, Color b, float t)
@@ -684,8 +679,6 @@ namespace Opacbar
         private int _min, _max, _value;
         private bool _drag;
         public string Label { get; set; }
-        public string Hint { get; set; }
-        public bool Gradient { get; set; }        // black -> white track (for the shade slider)
         public Func<int, string> Format { get; set; }
         public event EventHandler ValueChanged;
 
@@ -713,8 +706,6 @@ namespace Opacbar
                 if (h != null) h(this, EventArgs.Empty);
             }
         }
-
-        public bool Dragging { get { return _drag; } }
 
         public override int GetPreferredHeight(int width) { return Theme.Px(46); }
 
@@ -791,17 +782,8 @@ namespace Opacbar
             Gfx.Text(g, valueText, Theme.Body, new Rectangle(Width - valueW, 0, valueW, lineH),
                 Ink(Theme.TextSecondary), Theme.Surface, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
 
-            int lw = Gfx.Measure(Label, Theme.Body);
             Gfx.Text(g, Label, Theme.Body, new Rectangle(0, 0, Math.Max(0, Width - valueW - Theme.Px(8)), lineH),
                 Ink(Theme.Text), Theme.Surface, TextFormatFlags.VerticalCenter);
-            if (!string.IsNullOrEmpty(Hint))
-            {
-                int hx = lw + Theme.Px(8);
-                int hw = Width - valueW - Theme.Px(8) - hx;
-                if (hw > 0)
-                    Gfx.Text(g, Hint, Theme.Caption, new Rectangle(hx, 0, hw, lineH),
-                        Ink(Theme.TextSecondary), Theme.Surface, TextFormatFlags.VerticalCenter);
-            }
 
             float trackH = Theme.PxF(4);
             float left = ThumbD / 2f, right = Width - ThumbD / 2f;
@@ -810,26 +792,9 @@ namespace Opacbar
             float t = _max > _min ? (float)(_value - _min) / (_max - _min) : 0f;
             float tx = left + t * (right - left);
 
-            if (Gradient)
-            {
-                RectangleF gr = new RectangleF(left - Theme.PxF(2), cy - Theme.PxF(3), right - left + Theme.PxF(4), Theme.PxF(6));
-                using (GraphicsPath p = Gfx.RoundRect(gr, gr.Height / 2f))
-                using (LinearGradientBrush br = new LinearGradientBrush(gr, Color.Black, Color.White, 0f))
-                {
-                    if (!Enabled)
-                    {
-                        br.LinearColors = new Color[] { Ink(Color.Black), Ink(Color.White) };
-                    }
-                    g.FillPath(br, p);
-                }
-                Gfx.StrokeRound(g, Ink(Theme.TrackOff), gr, gr.Height / 2f, Math.Max(1f, Theme.PxF(1f)));
-            }
-            else
-            {
-                Gfx.FillRound(g, Ink(Theme.Hover), track, trackH / 2f);
-                if (tx > left)
-                    Gfx.FillRound(g, Ink(Theme.OnFill), new RectangleF(left, track.Y, tx - left, trackH), trackH / 2f);
-            }
+            Gfx.FillRound(g, Ink(Theme.Hover), track, trackH / 2f);
+            if (tx > left)
+                Gfx.FillRound(g, Ink(Theme.OnFill), new RectangleF(left, track.Y, tx - left, trackH), trackH / 2f);
 
             // Thumb: filled disc with a surface-colored ring so it reads on any track.
             float ring = Theme.PxF(2);
@@ -844,13 +809,12 @@ namespace Opacbar
     }
 
     // ------------------------------------------------------------------------------------
-    // Row: label (+ optional description) on the left, one control on the right
+    // Row: label on the left, one control on the right
     // ------------------------------------------------------------------------------------
     public class Row : FlyoutControl
     {
         private FlyoutControl _trailing;
         public string Label { get; set; }
-        public string Description { get; set; }
 
         public Row(string label, FlyoutControl trailing)
         {
@@ -863,7 +827,7 @@ namespace Opacbar
 
         public override int GetPreferredHeight(int width)
         {
-            return Theme.Px(string.IsNullOrEmpty(Description) ? 36 : 52);
+            return Theme.Px(36);
         }
 
         protected override void OnLayout(LayoutEventArgs e)
@@ -888,20 +852,8 @@ namespace Opacbar
             Graphics g = e.Graphics;
             int tw = _trailing != null ? _trailing.Width + Theme.Px(Theme.Space3) : 0;
             int avail = Math.Max(0, Width - tw);
-            if (string.IsNullOrEmpty(Description))
-            {
-                Gfx.Text(g, Label, Theme.Body, new Rectangle(0, 0, avail, Height), Ink(Theme.Text), Theme.Surface,
-                    TextFormatFlags.VerticalCenter);
-            }
-            else
-            {
-                int l1 = Theme.Px(20), l2 = Theme.Px(16);
-                int top = (Height - l1 - l2) / 2;
-                Gfx.Text(g, Label, Theme.Body, new Rectangle(0, top, avail, l1), Ink(Theme.Text), Theme.Surface,
-                    TextFormatFlags.VerticalCenter);
-                Gfx.Text(g, Description, Theme.Caption, new Rectangle(0, top + l1, avail, l2), Ink(Theme.TextSecondary),
-                    Theme.Surface, TextFormatFlags.VerticalCenter);
-            }
+            Gfx.Text(g, Label, Theme.Body, new Rectangle(0, 0, avail, Height), Ink(Theme.Text), Theme.Surface,
+                TextFormatFlags.VerticalCenter);
         }
     }
 
@@ -932,12 +884,10 @@ namespace Opacbar
         private Color? _dot;
         public bool Small { get; set; }
         public bool Center { get; set; }
-        public bool Secondary { get; set; }
 
         public TextBlock(string text)
         {
             _text = text;
-            Secondary = true;
         }
 
         public string TextValue
@@ -978,7 +928,7 @@ namespace Opacbar
             TextFormatFlags fl = TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
             if (Center) fl |= TextFormatFlags.HorizontalCenter;
             TextRenderer.DrawText(g, _text, F, new Rectangle(indent, 0, Width - indent, Height),
-                Secondary ? Theme.TextSecondary : Theme.Text, Theme.Surface, fl);
+                Theme.TextSecondary, Theme.Surface, fl);
         }
     }
 

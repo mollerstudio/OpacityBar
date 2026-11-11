@@ -5,24 +5,15 @@ using System.Text;
 namespace Opacbar
 {
     /// <summary>
-    /// Compiles a StyleProfile into a rules document for the helper (see native/PROTOCOL.md, v2).
+    /// Compiles a StyleProfile into the rules document the helper applies inside Explorer
+    /// (see native/PROTOCOL.md). One rule per line: selector, property, value, tab-separated.
     /// </summary>
     public static class TaskbarStyle
     {
         public const string Header = "opacbar-rules 2";
 
-        // Phase 1 targets. Phase 2 will refine these with the mapped taskbar tree.
         private const string FillSelector = "Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill";
         private const string StrokeSelector = "Windows.UI.Xaml.Shapes.Rectangle#BackgroundStroke";
-
-        private const string Transparent = "#00000000";
-
-        // Blur is the Acrylic brush with a weaker tint, so it reads as a cleaner, lighter blur:
-        //   TintOpacity            = opacity * 0.6
-        //   TintLuminosityOpacity  = max(0.05, opacity * 0.3)
-        private const double BlurTintScale = 0.6;
-        private const double BlurLuminosityScale = 0.3;
-        private const double BlurMinLuminosity = 0.05;
 
         /// <summary>A document with no rules: the helper restores everything.</summary>
         public static string EmptyDocument()
@@ -34,65 +25,39 @@ namespace Opacbar
         {
             if (p == null) return EmptyDocument();
 
-            StringBuilder sb = new StringBuilder();
-            sb.Append(Header);
-            // Blur (and the legacy Acrylic / Windows values) = Windows' own frosted taskbar material, untouched.
-            // It is the only blur that renders on the Win11 taskbar (verified on build 26300: XAML
-            // HostBackdrop acrylic shows only its fallback color; the DWM blur accent and system backdrop
-            // render black on the never-active taskbar window; fading the stock layer just ghosts a sharp
-            // image over a blurred one). Its Fill is never touched.
-            if (p.Material == Material.Clear)
-            {
-                // Clear hides Windows' layer instead of replacing its brush: an Opacity value is trivially
-                // restored, so switching back to Blur always brings the original frosted look back.
-                sb.Append('\n').Append(FillSelector).Append('\t').Append("Opacity").Append('\t').Append("0");
-            }
-            else if (p.Material == Material.Color)
-            {
-                sb.Append('\n').Append(FillSelector).Append('\t').Append("Fill").Append('\t').Append(BrushFor(p));
-            }
-            if (p.HideTopLine)
-                sb.Append('\n').Append(StrokeSelector).Append('\t').Append("Fill").Append('\t').Append(Transparent);
-            return sb.ToString();
-        }
-
-        /// <summary>The Fill value for a profile, or null for the stock Windows look.</summary>
-        public static string BrushFor(StyleProfile p)
-        {
+            StringBuilder sb = new StringBuilder(Header);
             int rgb;
             if (!TryParseHex(p.Color, out rgb)) rgb = 0;
-            double o = Math.Max(0, Math.Min(100, p.Opacity)) / 100.0;
-            string rrggbb = rgb.ToString("X6");
+            string tint = "#" + Alpha(p.Opacity / 100.0) + rgb.ToString("X6");
 
             switch (p.Material)
             {
                 case Material.Clear:
-                    return Transparent;
+                    // Hide Windows' background layer instead of replacing its brush: an Opacity value is
+                    // trivially restored, so switching style always brings the original back exactly.
+                    AppendRule(sb, FillSelector, "Opacity", "0");
+                    break;
                 case Material.Color:
-                    return "#" + Alpha(o) + rrggbb;
-                case Material.Acrylic:
-                case Material.Blur:
-                    // XAML's HostBackdrop AcrylicBrush does not blur inside the taskbar island (verified on
-                    // Win11 26300: it only shows its fallback color). Instead the background is made
-                    // transparent and the engine applies the DWM blur/acrylic accent to the taskbar window,
-                    // tinted with the chosen color + opacity (the TranslucentTB approach).
-                    return Transparent;
+                    AppendRule(sb, FillSelector, "Fill", tint);
+                    break;
                 default:
-                    return null;
+                    // Blur (and the legacy Acrylic / Windows values): adjustable blur drawn by the helper
+                    // (protocol v6), "@blur:<radius 0-100>[:#AARRGGBB tint][:host]". ":host" samples the desktop
+                    // behind the taskbar window; the default backdrop only sees the (empty) taskbar island.
+                    int amount = Math.Max(0, Math.Min(100, p.BlurAmount));
+                    AppendRule(sb, FillSelector, "Fill", "@blur:" + amount.ToString(CultureInfo.InvariantCulture) + ":" + tint + ":host");
+                    break;
             }
+
+            // Hide the top line by fading it out. Replacing its Fill brush knocks the blur into a flat
+            // fallback on Win11 26300 (verified: Blur + replaced line brush = sharp gray haze).
+            if (p.HideTopLine) AppendRule(sb, StrokeSelector, "Opacity", "0");
+            return sb.ToString();
         }
 
-        private static string AcrylicXaml(string rrggbb, double tint, double luminosity, double fallbackAlpha)
+        private static void AppendRule(StringBuilder sb, string selector, string property, string value)
         {
-            return "<AcrylicBrush BackgroundSource=\"HostBackdrop\" TintColor=\"#FF" + rrggbb + "\"" +
-                   " TintOpacity=\"" + Num(tint) + "\"" +
-                   " TintLuminosityOpacity=\"" + Num(luminosity) + "\"" +
-                   " FallbackColor=\"#" + Alpha(fallbackAlpha) + rrggbb + "\"/>";
-        }
-
-        private static string Num(double v)
-        {
-            return v.ToString("0.###", CultureInfo.InvariantCulture);
+            sb.Append('\n').Append(selector).Append('\t').Append(property).Append('\t').Append(value);
         }
 
         private static string Alpha(double fraction)

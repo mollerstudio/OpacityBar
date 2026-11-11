@@ -1,5 +1,5 @@
 // =====================================================================================
-//  OpacbarTAP.cpp - the small helper that Opacbar loads into explorer.exe  (protocol v2)
+//  OpacbarTAP.cpp - the small helper that Opacbar loads into explorer.exe  (protocol v6)
 // =====================================================================================
 //
 //  PLAIN-ENGLISH SUMMARY (read this first if you are auditing Opacbar)
@@ -40,22 +40,33 @@
 //    5. Values are created by the XAML runtime itself: either from a short string
 //       (IVisualTreeService::CreateInstance, e.g. "#00000000" or "4,0,4,0") or from a
 //       XAML snippet (Windows.UI.Xaml.Markup.XamlReader.Load, e.g. an AcrylicBrush).
+//       The special value "@blur:<radius>:<#AARRGGBB>" creates our own XAML brush
+//       (XamlCompositionBrushBase) that draws a Gaussian blur of what is behind the
+//       taskbar plus a tint, using the public Windows.UI.Composition effect API. It is
+//       purely visual: it never reads pixels back or sends them anywhere.
 //
 //  WHAT IT DOES NOT DO
 //    - No network access of any kind (no sockets, no HTTP, no WinINet/WinHTTP).
 //    - No file or registry reads or writes. No settings stored here at all.
 //    - No keyboard or mouse hooks, no keylogging, no screen capture, no clipboard access.
+//      (The blur brush is rendered by the system compositor on the GPU; this DLL never
+//      sees its pixels.)
 //    - Does not read or send text content shown by Explorer (window titles, labels...).
 //      The DUMP only contains element type names, x:Names and layout/brush values.
 //    - Only modifies elements inside the taskbar / system tray trees.
-//    - Does not start processes, load other DLLs (combase.dll functions are looked up
-//      with GetModuleHandle - it is already loaded in Explorer) or elevate privileges.
+//    - Does not start processes or elevate privileges. Its only imports are system DLLs
+//      that Explorer has already loaded (kernel32, user32, ole32/oleaut32, and the
+//      WinRT core in combase via api-ms-win-core-winrt-* API sets); WinRT objects used
+//      are in-box Windows.UI.Xaml / Windows.UI.Composition / Windows.Foundation classes.
 //    - Talks only to whoever sends the window messages above; the worst any other
 //      program could do through them is restyle the taskbar or read its element outline.
 //
 //  SAFETY RULES THIS FILE FOLLOWS (a crash here would crash Explorer)
 //    - Every HRESULT is checked; failures are skipped, never fatal.
-//    - No C++ exceptions are used or thrown (allocation uses nothrow / HeapAlloc).
+//    - C++ exceptions are only used by the C++/WinRT blur brush code; every place where
+//      one could occur is wrapped in try/catch and turned into an HRESULT, and every
+//      COM method / window procedure / XAML override of ours has a catch-all, so no
+//      exception can ever cross into Explorer. Our own allocations use nothrow / HeapAlloc.
 //    - All shared state is guarded by one critical section, and the lock is NEVER held
 //      while calling into XAML, creating windows or sending messages.
 //    - Properties are only changed on the UI thread that owns the element (each sink
@@ -68,14 +79,18 @@
 //      unloads code that still has live callbacks, threads or window procedures. Only a
 //      completed UNLOAD (unsubscribed, no callback in flight, all windows destroyed, no
 //      object of ours still held by Explorer) drops that reference.
-//    - The XAML Diagnostics and WinRT interfaces below are hand-declared (no SDK
-//      xamlom.h / WinRT headers needed). IIDs, struct layouts and vtable order were
-//      checked against xamlom.idl (Windows SDK / mingw-w64) and Windows.UI.Xaml.winmd.
-//      Do not reorder them.
+//    - The XAML Diagnostics interfaces and the XamlReader ABI below are hand-declared (no
+//      SDK xamlom.h needed). IIDs, struct layouts and vtable order were checked against
+//      xamlom.idl (Windows SDK / mingw-w64) and Windows.UI.Xaml.winmd. Do not reorder them.
+//      The blur brush uses the SDK's C++/WinRT headers (include\<ver>\cppwinrt).
+//    - Blur brushes are created and released only on the UI thread of the element they
+//      are set on (rule application runs there). The DLL is not unloaded while any of our
+//      C++/WinRT objects is still alive (winrt::get_module_lock()).
 //
-//  Build (MSVC, from a VS developer prompt):
-//    cl /nologo /LD /O2 /EHs-c- /GS /W4 /DUNICODE /D_UNICODE native\OpacbarTAP.cpp ^
-//       /Fe:OpacbarTAP.x64.dll /link /DEF:native\OpacbarTAP.def ole32.lib oleaut32.lib user32.lib
+//  Build (MSVC, from a VS developer prompt; the Windows SDK provides C++/WinRT):
+//    cl /nologo /LD /O2 /std:c++17 /EHsc /permissive- /GS /W4 /DUNICODE /D_UNICODE ^
+//       native\OpacbarTAP.cpp /Fe:OpacbarTAP.x64.dll /link /DEF:native\OpacbarTAP.def ^
+//       kernel32.lib ole32.lib oleaut32.lib user32.lib dxguid.lib windowsapp.lib
 //
 //  License: MIT (see LICENSE in the repository root).
 // =====================================================================================
@@ -86,14 +101,34 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
 #include <windows.h>
+#include <unknwn.h>      // before C++/WinRT: enables classic COM interfaces in winrt::implements
 #include <ole2.h>
 #include <oleauto.h>
 #include <ocidl.h>
 #include <wchar.h>
 #include <stdlib.h>
 #include <new>
+#include <d2d1_1.h>       // D2D1 effect property enums (no D2D function is called)
+#include <d2d1effects.h>  // CLSID_D2D1GaussianBlur / Flood / Composite (dxguid.lib)
+
+// C++/WinRT - used only for the @blur brush (see "Adjustable blur brush" below).
+#ifdef GetCurrentTime
+#undef GetCurrentTime     // clashes with Windows.UI.Xaml.Media.Animation
+#endif
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Effects.h>
+#include <winrt/Windows.UI.h>
+#include <winrt/Windows.UI.Composition.h>
+#include <winrt/Windows.UI.Xaml.h>
+#include <winrt/Windows.UI.Xaml.Hosting.h>
+#include <winrt/Windows.UI.Xaml.Media.h>
+#include <winrt/Windows.UI.Xaml.Shapes.h>
 
 // -------------------------------------------------------------------------------------
 //  IPC contract with Opacbar.exe (see native/PROTOCOL.md, keep in sync with src/*.cs)
@@ -110,8 +145,9 @@
 #define WM_OPAC_SHUTDOWN      (WM_APP + 0x18)  // Internal: restore this thread, destroy this sink.
 #define WM_OPAC_UNLOAD_RUN    (WM_APP + 0x19)  // Internal: control thread finishes the unload.
 #define OPAC_PING_REPLY       0x0BAC
-#define OPAC_PROTOCOL_VERSION 5   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD, 4 = tree service via IXamlDiagnostics,
-                                  // 5 = originals kept alive (exact restore of Explorer's acrylic brush)
+#define OPAC_PROTOCOL_VERSION 6   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD, 4 = tree service via IXamlDiagnostics,
+                                  // 5 = originals kept alive (exact restore of Explorer's acrylic brush),
+                                  // 6 = "@blur:<radius>:<#AARRGGBB>" adjustable blur brush values
                                   // Bump on EVERY helper change: Opacbar restarts Explorer to load a newer helper.
 #define OPAC_FLAG_ON          0x1              // v1 SET bit0: override on
 #define OPAC_FLAG_HIDE_STROKE 0x2              // v1 SET bit1: make BackgroundStroke transparent too
@@ -669,7 +705,79 @@ static bool IsFrameType(const WCHAR* type)
 static const BYTE kValClear = 0;   // "@clear"
 static const BYTE kValPlain = 1;   // CreateInstance(type, string)
 static const BYTE kValXaml  = 2;   // XamlReader.Load
+static const BYTE kValBlur  = 3;   // "@blur:<radius>:<#AARRGGBB>[:host]" -> our blur brush
 static const UINT16 kMatchDone = 0xFFFF;
+
+// Value kinds whose object we create ourselves and keep alive in Record::xamlObj.
+static bool IsObjectKind(BYTE kind) { return kind == kValXaml || kind == kValBlur; }
+
+// Parsed "@blur:<radius>:<#AARRGGBB>[:host]".
+struct BlurSpec {
+    float radius;        // Gaussian blur standard deviation in DIPs, clamped to 0..100
+    BYTE  a, r, g, b;    // tint drawn over the blurred backdrop (straight alpha)
+    bool  host;          // ":host" = sample the host backdrop (behind the window) instead
+};
+
+static int HexDigit(WCHAR c)
+{
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'a' && c <= L'f') return c - L'a' + 10;
+    if (c >= L'A' && c <= L'F') return c - L'A' + 10;
+    return -1;
+}
+
+// Accepts "@blur:R", "@blur:R:#AARRGGBB", "@blur:R:#RRGGBB" and any of those + ":host".
+// R is a decimal number (e.g. 30 or 12.5). No locale-dependent parsing.
+static bool ParseBlurSpec(const WCHAR* v, BlurSpec* out)
+{
+    ZeroMemory(out, sizeof(*out));
+    if (!v || wcsncmp(v, L"@blur:", 6) != 0) return false;
+    const WCHAR* p = v + 6;
+    UINT32 whole = 0;
+    int digits = 0;
+    while (*p >= L'0' && *p <= L'9') {
+        whole = whole * 10 + (UINT32)(*p - L'0');
+        if (whole > 100000) return false;
+        digits++;
+        p++;
+    }
+    float frac = 0.0f, scale = 0.1f;
+    if (*p == L'.') {
+        p++;
+        while (*p >= L'0' && *p <= L'9') {
+            if (scale > 1e-6f) frac += (float)(*p - L'0') * scale;
+            scale *= 0.1f;
+            digits++;
+            p++;
+        }
+    }
+    if (digits == 0) return false;
+    float radius = (float)whole + frac;
+    if (radius > 100.0f) radius = 100.0f;
+    if (radius < 0.0f) radius = 0.0f;
+    out->radius = radius;
+
+    if (*p == L':' && p[1] == L'#') {
+        p += 2;
+        int n = 0;
+        while (n < 9 && HexDigit(p[n]) >= 0) n++;
+        if (n != 8 && n != 6) return false;
+        UINT32 argb = 0;
+        for (int i = 0; i < n; i++) argb = (argb << 4) | (UINT32)HexDigit(p[i]);
+        if (n == 6) argb |= 0xFF000000u;
+        out->a = (BYTE)(argb >> 24);
+        out->r = (BYTE)(argb >> 16);
+        out->g = (BYTE)(argb >> 8);
+        out->b = (BYTE)argb;
+        p += n;
+    }
+    if (*p == L':') {
+        if (wcscmp(p + 1, L"host") != 0) return false;
+        out->host = true;
+        return true;
+    }
+    return *p == 0;
+}
 
 struct Seg {
     UINT16 typeId;
@@ -816,7 +924,12 @@ static bool ParseRuleLine(WCHAR* line, Rule* r)
     r->propId = pid;
     r->value = value;
     r->valueLen = (UINT32)wcslen(value);
+    BlurSpec blur;
     if (wcscmp(value, L"@clear") == 0) r->kind = kValClear;
+    else if (wcsncmp(value, L"@blur:", 6) == 0) {
+        if (!ParseBlurSpec(value, &blur)) return false;   // malformed: ignore the line
+        r->kind = kValBlur;
+    }
     else if (value[0] == L'<')         r->kind = kValXaml;
     else                               r->kind = kValPlain;
     r->valueHash = HashValue(r->kind, value, r->valueLen);
@@ -1341,6 +1454,347 @@ static HRESULT LoadXamlValue(IXamlDiagnostics* diag, const WCHAR* text, UINT32 l
     return S_OK;
 }
 
+// -------------------------------------------------------------------------------------
+//  Adjustable blur brush ("@blur:<radius>:<#AARRGGBB>[:host]")
+//
+//  Explorer's own taskbar brush blurs with a fixed strength, and an AcrylicBrush loaded
+//  through XamlReader only shows its fallback color on the taskbar. So, like the
+//  "WindhawkBlur" brush of Windhawk's "Windows 11 Taskbar Styler" mod (idea credited
+//  there to TranslucentTB's XamlBlurBrush), we build our own XAML brush:
+//    a class deriving from Windows.UI.Xaml.Media.XamlCompositionBrushBase whose
+//    OnConnected() creates a Windows.UI.Composition effect brush
+//        backdrop (CompositionBackdropBrush, or HostBackdropBrush with ":host")
+//          -> D2D1 Gaussian blur (standard deviation = radius)
+//          -> D2D1 Flood (tint) composited SOURCE_OVER on top
+//    and assigns it to CompositionBrush. The effect graph is described to the
+//    compositor with small objects implementing IGraphicsEffect + IGraphicsEffectSource
+//    + IGraphicsEffectD2D1Interop (what Win2D's effect classes do).
+//  This is an independent implementation of that technique (no code copied).
+//  It only creates XAML / Composition objects on the element's own UI thread.
+// -------------------------------------------------------------------------------------
+namespace opacfx {
+
+namespace wf  = winrt::Windows::Foundation;
+namespace wge = winrt::Windows::Graphics::Effects;
+namespace wuc = winrt::Windows::UI::Composition;
+namespace wux = winrt::Windows::UI::Xaml;
+
+// GRAPHICS_EFFECT_PROPERTY_MAPPING (windows.graphics.effects.interop.h), 32-bit enum.
+enum PropMapping : int {
+    kMapUnknown = 0, kMapDirect = 1, kMapVectorX = 2, kMapVectorY = 3, kMapVectorZ = 4,
+    kMapVectorW = 5, kMapRectToVector4 = 6, kMapRadiansToDegrees = 7,
+    kMapColorMatrixAlphaMode = 8, kMapColorToVector3 = 9, kMapColorToVector4 = 10
+};
+
+// ABI::Windows::Graphics::Effects::IGraphicsEffectD2D1Interop, hand-declared in vtable
+// order from windows.graphics.effects.interop.h (the ABI pointer types are passed as void**:
+// GetProperty returns an ABI IPropertyValue*, GetSource an ABI IGraphicsEffectSource*).
+struct __declspec(uuid("2FC57384-A068-44D7-A331-30982FCF7177"))
+IGraphicsEffectD2D1InteropAbi : public ::IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetEffectId(GUID* id) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetNamedPropertyMapping(LPCWSTR name, UINT* index, PropMapping* mapping) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetPropertyCount(UINT* count) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetProperty(UINT index, void** value) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetSource(UINT index, void** source) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetSourceCount(UINT* count) = 0;
+};
+
+static const UINT kPropFloat  = 0;
+static const UINT kPropUInt   = 1;
+static const UINT kPropFloat4 = 2;
+static const UINT kMaxProps   = 3;
+static const UINT kMaxSources = 2;
+
+struct EffectProp {
+    const wchar_t* name;
+    UINT           kind;
+    float          f[4];
+    UINT32         u;
+    PropMapping    mapping;
+};
+
+// One D2D1 effect node. Property i of the array is D2D property index i.
+struct Effect : winrt::implements<Effect, wge::IGraphicsEffect, wge::IGraphicsEffectSource,
+                                  IGraphicsEffectD2D1InteropAbi> {
+    GUID          m_id = {};
+    winrt::hstring m_name;
+    EffectProp    m_props[kMaxProps] = {};
+    UINT          m_nProps = 0;
+    wge::IGraphicsEffectSource m_src[kMaxSources] = { nullptr, nullptr };
+    UINT          m_nSrc = 0;
+
+    void SetFloat(UINT index, const wchar_t* name, float v)
+    {
+        if (index >= kMaxProps) return;
+        EffectProp& p = m_props[index];
+        p.name = name; p.kind = kPropFloat; p.f[0] = v; p.mapping = kMapDirect;
+        if (index + 1 > m_nProps) m_nProps = index + 1;
+    }
+    void SetUInt(UINT index, const wchar_t* name, UINT32 v)
+    {
+        if (index >= kMaxProps) return;
+        EffectProp& p = m_props[index];
+        p.name = name; p.kind = kPropUInt; p.u = v; p.mapping = kMapDirect;
+        if (index + 1 > m_nProps) m_nProps = index + 1;
+    }
+    void SetColor(UINT index, const wchar_t* name, BYTE a, BYTE r, BYTE g, BYTE b)
+    {
+        if (index >= kMaxProps) return;
+        EffectProp& p = m_props[index];
+        p.name = name; p.kind = kPropFloat4;
+        p.f[0] = r / 255.0f; p.f[1] = g / 255.0f; p.f[2] = b / 255.0f; p.f[3] = a / 255.0f;
+        p.mapping = kMapColorToVector4;
+        if (index + 1 > m_nProps) m_nProps = index + 1;
+    }
+    void SetSource(UINT index, wge::IGraphicsEffectSource const& s)
+    {
+        if (index >= kMaxSources) return;
+        m_src[index] = s;
+        if (index + 1 > m_nSrc) m_nSrc = index + 1;
+    }
+
+    // IGraphicsEffect
+    winrt::hstring Name() { return m_name; }
+    void Name(winrt::hstring const& name) { m_name = name; }
+
+    // IGraphicsEffectD2D1Interop
+    HRESULT STDMETHODCALLTYPE GetEffectId(GUID* id) noexcept override
+    {
+        if (!id) return E_POINTER;
+        *id = m_id;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetNamedPropertyMapping(LPCWSTR name, UINT* index, PropMapping* mapping) noexcept override
+    {
+        if (!name || !index || !mapping) return E_POINTER;
+        for (UINT i = 0; i < m_nProps; i++) {
+            if (m_props[i].name && _wcsicmp(m_props[i].name, name) == 0) {
+                *index = i;
+                *mapping = m_props[i].mapping;
+                return S_OK;
+            }
+        }
+        return E_INVALIDARG;
+    }
+    HRESULT STDMETHODCALLTYPE GetPropertyCount(UINT* count) noexcept override
+    {
+        if (!count) return E_POINTER;
+        *count = m_nProps;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetProperty(UINT index, void** value) noexcept override
+    {
+        if (!value) return E_POINTER;
+        *value = nullptr;
+        if (index >= m_nProps) return E_BOUNDS;
+        try {
+            const EffectProp& p = m_props[index];
+            wf::IInspectable boxed{ nullptr };
+            if (p.kind == kPropUInt)
+                boxed = wf::PropertyValue::CreateUInt32(p.u);
+            else if (p.kind == kPropFloat4)
+                boxed = wf::PropertyValue::CreateSingleArray(winrt::array_view<float const>(&p.f[0], &p.f[0] + 4));
+            else
+                boxed = wf::PropertyValue::CreateSingle(p.f[0]);
+            wf::IPropertyValue pv = boxed.as<wf::IPropertyValue>();
+            *value = winrt::detach_abi(pv);
+            return S_OK;
+        } catch (...) {
+            return winrt::to_hresult();
+        }
+    }
+    HRESULT STDMETHODCALLTYPE GetSource(UINT index, void** source) noexcept override
+    {
+        if (!source) return E_POINTER;
+        *source = nullptr;
+        if (index >= m_nSrc || !m_src[index]) return E_BOUNDS;
+        wge::IGraphicsEffectSource s = m_src[index];
+        *source = winrt::detach_abi(s);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetSourceCount(UINT* count) noexcept override
+    {
+        if (!count) return E_POINTER;
+        *count = m_nSrc;
+        return S_OK;
+    }
+};
+
+// The XAML brush. Holds only plain values + the compositor; the composition brush is
+// created when XAML connects the brush to a rendered element and closed on disconnect.
+struct BlurBrush : wux::Media::XamlCompositionBrushBaseT<BlurBrush> {
+    BlurBrush(wuc::Compositor const& compositor, BlurSpec const& spec)
+        : m_compositor(compositor), m_spec(spec) {}
+
+    void OnConnected()
+    {
+        try {
+            if (this->CompositionBrush()) return;
+            this->CompositionBrush(Build());
+        } catch (...) {
+            // Leave the brush empty: XAML then draws FallbackColor (= the tint).
+        }
+    }
+
+    void OnDisconnected()
+    {
+        try {
+            wuc::CompositionBrush brush = this->CompositionBrush();
+            if (brush) {
+                this->CompositionBrush(nullptr);
+                brush.Close();
+            }
+        } catch (...) {
+        }
+    }
+
+private:
+    wuc::CompositionBrush Build()
+    {
+        wuc::CompositionBrush backdrop = m_spec.host
+            ? wuc::CompositionBrush(m_compositor.CreateHostBackdropBrush())
+            : wuc::CompositionBrush(m_compositor.CreateBackdropBrush());
+
+        const bool blur = m_spec.radius > 0.0f;
+        const bool tint = m_spec.a != 0;
+        if (!blur && !tint) return backdrop;   // radius 0, no tint: plain (clear) backdrop
+
+        wge::IGraphicsEffectSource stack = wuc::CompositionEffectSourceParameter(L"backdrop");
+        wge::IGraphicsEffect top{ nullptr };
+
+        if (blur) {
+            winrt::com_ptr<Effect> e = winrt::make_self<Effect>();
+            e->m_id = CLSID_D2D1GaussianBlur;
+            e->m_name = L"OpacbarBlur";
+            e->SetFloat(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, L"BlurAmount", m_spec.radius);
+            e->SetUInt(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION, L"Optimization",
+                       (UINT32)D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED);
+            // HARD: edges stay opaque instead of fading to transparent at the bar's border.
+            e->SetUInt(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, L"BorderMode", (UINT32)D2D1_BORDER_MODE_HARD);
+            e->SetSource(0, stack);
+            top = e.as<wge::IGraphicsEffect>();
+            stack = e.as<wge::IGraphicsEffectSource>();
+        }
+        if (tint) {
+            winrt::com_ptr<Effect> flood = winrt::make_self<Effect>();
+            flood->m_id = CLSID_D2D1Flood;
+            flood->m_name = L"OpacbarTint";
+            flood->SetColor(D2D1_FLOOD_PROP_COLOR, L"Color", m_spec.a, m_spec.r, m_spec.g, m_spec.b);
+
+            winrt::com_ptr<Effect> comp = winrt::make_self<Effect>();
+            comp->m_id = CLSID_D2D1Composite;
+            comp->m_name = L"OpacbarComposite";
+            comp->SetUInt(D2D1_COMPOSITE_PROP_MODE, L"Mode", (UINT32)D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            comp->SetSource(0, stack);                                        // destination
+            comp->SetSource(1, flood.as<wge::IGraphicsEffectSource>());       // source (on top)
+            top = comp.as<wge::IGraphicsEffect>();
+        }
+
+        wuc::CompositionEffectFactory factory = m_compositor.CreateEffectFactory(top);
+        wuc::CompositionEffectBrush brush = factory.CreateBrush();
+        brush.SetSourceParameter(L"backdrop", backdrop);
+        return brush;
+    }
+
+    wuc::Compositor m_compositor{ nullptr };
+    BlurSpec        m_spec;
+};
+
+// Creates a blur brush for `rawElement` (an IInspectable* of the target element) on the
+// current (UI) thread. On success *out holds one reference to the brush.
+static HRESULT CreateBlurBrush(IInspectableAbi* rawElement, BlurSpec const& spec, IInspectableAbi** out)
+{
+    *out = NULL;
+    try {
+        wf::IInspectable element{ nullptr };
+        winrt::copy_from_abi(element, static_cast<void*>(rawElement));
+        wux::UIElement ui = element.try_as<wux::UIElement>();
+        if (!ui) return E_NOINTERFACE;
+        wuc::Compositor compositor = wux::Hosting::ElementCompositionPreview::GetElementVisual(ui).Compositor();
+        if (!compositor) return E_FAIL;
+
+        wf::IInspectable brush = winrt::make<BlurBrush>(compositor, spec);
+        winrt::Windows::UI::Color tint{};
+        tint.A = spec.a; tint.R = spec.r; tint.G = spec.g; tint.B = spec.b;
+        // Shown by XAML when effects are unavailable (e.g. transparency effects off).
+        brush.as<wux::Media::XamlCompositionBrushBase>().FallbackColor(tint);
+
+        void* abi = nullptr;
+        winrt::copy_to_abi(brush, abi);
+        *out = static_cast<IInspectableAbi*>(abi);
+        return *out ? S_OK : E_FAIL;
+    } catch (...) {
+        if (*out) { (*out)->Release(); *out = NULL; }
+        return winrt::to_hresult();
+    }
+}
+
+// Fallback when the diagnostics handle route cannot set the brush: Shape.Fill directly.
+static HRESULT SetFillDirect(IInspectableAbi* rawElement, IInspectableAbi* rawBrush)
+{
+    try {
+        wf::IInspectable element{ nullptr }, brushObj{ nullptr };
+        winrt::copy_from_abi(element, static_cast<void*>(rawElement));
+        winrt::copy_from_abi(brushObj, static_cast<void*>(rawBrush));
+        wux::Shapes::Shape shape = element.try_as<wux::Shapes::Shape>();
+        wux::Media::Brush brush = brushObj.try_as<wux::Media::Brush>();
+        if (!shape || !brush) return E_NOINTERFACE;
+        shape.Fill(brush);
+        return S_OK;
+    } catch (...) {
+        return winrt::to_hresult();
+    }
+}
+
+// Number of our C++/WinRT objects (brushes, effect nodes) still alive anywhere.
+static UINT32 LiveObjects()
+{
+    return static_cast<UINT32>(winrt::get_module_lock());
+}
+
+} // namespace opacfx
+
+// "@blur:..." -> new brush set on (e, idx). On success *objOut holds one reference and
+// *handleOut is its diagnostics handle (0 if it was set through the Shape.Fill fallback).
+static HRESULT ApplyBlurValue(const Ctx& cx, UINT64 e, UINT32 idx, const WCHAR* propName, const Rule& r,
+                              IInspectableAbi** objOut, UINT64* handleOut)
+{
+    *objOut = NULL;
+    *handleOut = 0;
+    if (!cx.diag) return E_NOINTERFACE;
+    BlurSpec spec;
+    if (!ParseBlurSpec(r.value, &spec)) return E_INVALIDARG;
+
+    IInspectableAbi* el = NULL;
+    HRESULT hr = cx.diag->GetIInspectableFromHandle(e, &el);
+    if (FAILED(hr) || !el) return FAILED(hr) ? hr : E_FAIL;
+
+    IInspectableAbi* brush = NULL;
+    hr = opacfx::CreateBlurBrush(el, spec, &brush);
+    if (SUCCEEDED(hr)) {
+        UINT64 h = 0;
+        HRESULT hh = cx.diag->GetHandleFromIInspectable(brush, &h);
+        if (FAILED(hh) || !h) {
+            h = 0;
+            hh = cx.diag->RegisterInstance(brush, &h);
+        }
+        if (SUCCEEDED(hh) && h) hr = cx.svc->SetProperty(e, h, idx);
+        else hr = FAILED(hh) ? hh : E_FAIL;
+        if (FAILED(hr) && StrEq(propName, L"Fill")) {
+            h = 0;
+            hr = opacfx::SetFillDirect(el, brush);
+        }
+        if (SUCCEEDED(hr)) {
+            *objOut = brush;
+            *handleOut = h;
+            brush = NULL;
+        }
+    }
+    if (brush) brush->Release();
+    el->Release();
+    return hr;
+}
+
 // Applies one rule to one (element, property). Returns true if it is now applied & tracked.
 static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, const Chain* c)
 {
@@ -1443,15 +1897,19 @@ static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, cons
     IInspectableAbi* newObj = NULL;
     if (r.kind == kValClear) {
         hr = cx.svc->ClearProperty(e, idx);
-    } else if (r.kind == kValXaml) {
-        if (hasRec && recKind == kValXaml && recHash == r.valueHash && recHandle) {
-            valHandle = recHandle;               // same XAML as before: reuse our object
+    } else if (IsObjectKind(r.kind)) {
+        if (hasRec && recKind == r.kind && recHash == r.valueHash && recHandle) {
+            valHandle = recHandle;               // same value as before: reuse our object
             hr = cx.svc->SetProperty(e, valHandle, idx);
         }
         if (FAILED(hr)) {
             valHandle = 0;
-            hr = LoadXamlValue(cx.diag, r.value, r.valueLen, &newObj, &valHandle);
-            if (SUCCEEDED(hr)) hr = cx.svc->SetProperty(e, valHandle, idx);
+            if (r.kind == kValBlur) {
+                hr = ApplyBlurValue(cx, e, idx, propName, r, &newObj, &valHandle);   // sets it too
+            } else {
+                hr = LoadXamlValue(cx.diag, r.value, r.valueLen, &newObj, &valHandle);
+                if (SUCCEEDED(hr)) hr = cx.svc->SetProperty(e, valHandle, idx);
+            }
         }
     } else {
         hr = SetPlain(cx, e, idx, r, c, first, eff, &valHandle);
@@ -1489,7 +1947,7 @@ static bool ApplyOne(const Ctx& cx, UINT64 e, UINT16 propId, const Rule& r, cons
                 oldObj = rec->xamlObj;
                 rec->xamlObj = newObj;
                 newObj = NULL;
-            } else if (r.kind != kValXaml) {
+            } else if (!IsObjectKind(r.kind)) {
                 oldObj = rec->xamlObj;
                 rec->xamlObj = NULL;
             }
@@ -2030,7 +2488,20 @@ static LRESULT HandleRulesDoc(const WCHAR* data, SIZE_T nChars)
     return (LRESULT)ApplyRulesOnThisThread(NULL);
 }
 
+static LRESULT SinkWndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+// No C++ exception may leave a window procedure (it would unwind through user32/Explorer).
 static LRESULT CALLBACK SinkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    try {
+        return SinkWndProcImpl(hwnd, msg, wParam, lParam);
+    } catch (...) {
+        OutputDebugStringW(L"[OpacbarTAP] exception caught in window procedure\n");
+        return 0;
+    }
+}
+
+static LRESULT SinkWndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (g_unloading) {
         // Inert: never (re)apply anything once an unload started.
@@ -2271,7 +2742,9 @@ static DWORD WINAPI ControlThread(LPVOID param)
     if (SUCCEEDED(hrInit)) CoUninitialize();
     // Drop our module reference only when Explorer holds no object of ours any more;
     // otherwise the code stays mapped (inert) until Explorer exits.
-    if (release && g_selfRef && g_objects == 0 && g_locks == 0) {
+    // Blur brushes / effect nodes are our code too: give XAML a moment to drop them.
+    for (int i = 0; release && i < 200 && opacfx::LiveObjects() != 0; i++) Sleep(10);
+    if (release && g_selfRef && g_objects == 0 && g_locks == 0 && opacfx::LiveObjects() == 0) {
         InterlockedExchange(&g_selfRef, 0);
         Sleep(100);   // let any callback epilogue that decremented g_inCallback return
         FreeLibraryAndExitThread(g_module, 0);
@@ -2339,8 +2812,17 @@ public:
         return (ULONG)r;
     }
 
-    // IObjectWithSite
+    // IObjectWithSite (no C++ exception may cross this COM boundary)
     HRESULT STDMETHODCALLTYPE SetSite(IUnknown* site) override
+    {
+        try {
+            return SetSiteImpl(site);
+        } catch (...) {
+            return E_UNEXPECTED;
+        }
+    }
+
+    HRESULT SetSiteImpl(IUnknown* site)
     {
         IUnknown* old = NULL;
         {
@@ -2461,7 +2943,11 @@ public:
         ParentChildRelation relation, VisualElement element, VisualMutationType mutationType) override
     {
         InterlockedIncrement(&g_inCallback);
-        if (!g_unloading) TreeChange(relation, element, mutationType);
+        try {
+            if (!g_unloading) TreeChange(relation, element, mutationType);
+        } catch (...) {
+            // never let an exception cross into the XAML runtime
+        }
         InterlockedDecrement(&g_inCallback);
         return S_OK;
     }
@@ -2609,7 +3095,7 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
 STDAPI DllCanUnloadNow()
 {
     // While subscribed (or while Explorer holds any object of ours) we stay loaded.
-    if (g_advised || g_selfRef || g_objects > 0 || g_locks > 0) return S_FALSE;
+    if (g_advised || g_selfRef || g_objects > 0 || g_locks > 0 || opacfx::LiveObjects() != 0) return S_FALSE;
     return S_OK;
 }
 
