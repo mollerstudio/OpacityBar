@@ -130,6 +130,7 @@ namespace OpacityBar
 
             Lifecycle.QuitRunning(8000);           // the app restores the taskbar as it quits
             TapHelper.UnloadFromExplorer(5000);    // then the helper leaves Explorer and frees its DLL
+            ThemeSync.RemoveAll();                 // the user's own Windows mode back, our registry key gone
             Lifecycle.SetRunAtStartup("", false);
             Lifecycle.DeleteQuietly(AppInfo.StartMenuShortcut);
             Lifecycle.RemoveUninstallEntry();

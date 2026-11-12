@@ -110,6 +110,8 @@ namespace OpacityBar
             List<IntPtr> taskbars = FindAllTaskbars();
             ActiveTaskbarCount = taskbars.Count;
 
+            ThemeSync.Update(_config.DesktopProfile, force);   // Windows mode follows the bar (restores for Normal)
+
             if (_config.DesktopProfile.Material == Material.Normal)
             {
                 // The stock Windows look: restore once and stay out of the way.
@@ -309,6 +311,7 @@ namespace OpacityBar
                 _fastTimer = null;
             }
             RestoreTaskbarsToDefault(null);
+            ThemeSync.Restore();
             _tap.Dispose();
         }
     }

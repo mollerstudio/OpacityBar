@@ -37,9 +37,11 @@ This is the complete list. Everything is under your own user account (HKCU and y
 | :--- | :--- | :--- |
 | `Software\Microsoft\Windows\CurrentVersion\Run` → `OpacityBar` | Start with Windows | Only while that option is on |
 | `Software\Microsoft\Windows\CurrentVersion\Uninstall\OpacityBar` | The entry in Settings > Apps | Installer only |
+| `Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` → `SystemUsesLightTheme` | "Windows mode" (light/dark for the taskbar, Start and notification panels), switched so taskbar icons stay readable on your bar color. "App mode" is never touched. | When the bar is light on dark mode, or dark on light mode |
+| `Software\OpacityBar` → `SavedSystemUsesLightTheme` | Your own Windows mode, remembered so it can be put back for Normal, on quit and on uninstall | Only while OpacityBar has switched it |
 
 OpacityBar also **reads** (never changes) Windows' light/dark and transparency settings, and the current
-wallpaper image, so it can pick readable black or white taskbar icons. The wallpaper is only measured for
+wallpaper image, so it knows how light your bar looks. The wallpaper is only measured for
 brightness on your PC and never stored or sent anywhere. In diagnostics mode it reads the Windows build number.
 
 **Inside Explorer (Windows 11 only)**

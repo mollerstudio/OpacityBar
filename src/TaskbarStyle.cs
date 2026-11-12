@@ -61,17 +61,7 @@ namespace OpacityBar
             // fallback on Win11 26300 (verified: Blur + replaced line brush = sharp gray haze).
             if (p.HideTopLine) AppendRule(sb, StrokeSelector, "Opacity", "0");
 
-            // Readable icons: when the bar is light but Windows draws white glyphs (or the other way round),
-            // recolor the text glyphs of the tray and clock, and the app labels on the bar. The search box
-            // keeps its own colors (it sits on its own pill). Colored app icons are images: unaffected.
-            string ink = InkContrast.PickInk(p, rgb);
-            if (ink != null)
-            {
-                AppendRule(sb, "SystemTray.SystemTrayFrame > Windows.UI.Xaml.Controls.TextBlock", "Foreground", ink);
-                AppendRule(sb, "Taskbar.TaskbarFrame > Windows.UI.Xaml.Controls.TextBlock#LabelControl", "Foreground", ink);
-                // The accent-colored part of some tray glyphs keeps its accent color.
-                AppendRule(sb, "SystemTray.AdaptiveTextBlock#AccentOverlay > Windows.UI.Xaml.Controls.TextBlock", "Foreground", "@clear");
-            }
+            // Readable icons: ThemeSync switches Windows mode to match the bar (see ThemeSync.cs).
             return sb.ToString();
         }
 
