@@ -14,7 +14,7 @@ namespace OpacityBar
     public static class AppInfo
     {
         public const string Name = "OpacityBar";
-        public const string Version = "1.1.0";          // also AssemblyVersion (AssemblyInfo.cs)
+        public const string Version = "1.2.0";          // also AssemblyVersion (AssemblyInfo.cs)
         public const string Publisher = "moller.studio";
         public const string PublisherUrl = "https://moller.studio";
         public const string Website = "https://github.com/mollerstudio/OpacityBar";

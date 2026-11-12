@@ -38,8 +38,9 @@ This is the complete list. Everything is under your own user account (HKCU and y
 | `Software\Microsoft\Windows\CurrentVersion\Run` → `OpacityBar` | Start with Windows | Only while that option is on |
 | `Software\Microsoft\Windows\CurrentVersion\Uninstall\OpacityBar` | The entry in Settings > Apps | Installer only |
 
-OpacityBar also **reads** (never changes) Windows' light/dark and transparency settings, so it can match
-them. In diagnostics mode it reads the Windows build number.
+OpacityBar also **reads** (never changes) Windows' light/dark and transparency settings, and the current
+wallpaper image, so it can pick readable black or white taskbar icons. The wallpaper is only measured for
+brightness on your PC and never stored or sent anywhere. In diagnostics mode it reads the Windows build number.
 
 **Inside Explorer (Windows 11 only)**
 

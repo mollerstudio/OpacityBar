@@ -5,6 +5,16 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-12
+
+### Added
+- **Readable icons on any color.** When the taskbar is light but Windows draws white icons (or the other way
+  round), the clock, date and tray icons switch to black or white automatically. OpacityBar judges the bar's
+  brightness from your color, its opacity and the wallpaper behind the bar. Colored app icons stay as they are.
+
+### Fixed
+- Release notes no longer include older changelog sections.
+
 ## [1.1.0] - 2026-11-11
 
 The first public release, under the new name **OpacityBar** (previously Opacbar).
@@ -42,5 +52,6 @@ The first public release, under the new name **OpacityBar** (previously Opacbar)
 
 - First test version, as Opacbar (development builds only, never published as a release).
 
-[Unreleased]: https://github.com/mollerstudio/OpacityBar/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/mollerstudio/OpacityBar/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.2.0
 [1.1.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.1.0
