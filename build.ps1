@@ -75,6 +75,13 @@ foreach ($n in "tray-black.ico", "tray-white.ico") {
     $f = Join-Path $Assets $n
     if (Test-Path $f) { $AppExtra += "/resource:$f,$n"; Say "embedding assets\$n" }
 }
+# UI font: Outfit (SIL Open Font License, assets\fonts\OFL.txt), embedded in the app and the installer.
+$FontRes = @()
+foreach ($n in "Outfit-Regular.ttf", "Outfit-SemiBold.ttf") {
+    $f = Join-Path $Assets "fonts\$n"
+    if (Test-Path $f) { $FontRes += "/resource:$f,$n"; Say "embedding assets\fonts\$n" }
+}
+$AppExtra += $FontRes
 Compile $OutExe $AppExtra $AppSources
 if (-not $toDist) { return }
 
@@ -105,6 +112,7 @@ foreach ($n in "logo-black.png", "logo-white.png") {
     $f = Join-Path $Assets $n
     if (Test-Path $f) { $SetupExtra += "/resource:$f,$n"; Say "embedding assets\$n in the installer" }
 }
+$SetupExtra += $FontRes
 
 # The installer shares the app's theme, controls and install plumbing.
 $SetupSources = @("AppInfo.cs", "Lifecycle.cs", "NativeMethods.cs", "ThemeAndControls.cs") | ForEach-Object { Join-Path $SrcDir $_ }

@@ -117,7 +117,8 @@ docs/         images for this README
 ## License
 
 The code is [MIT](LICENSE) © 2026 [moller.studio](https://moller.studio). The OpacityBar name and logo are not
-covered by the MIT license; see [TRADEMARKS.md](TRADEMARKS.md). Contributions are welcome under the same license
+covered by the MIT license; see [TRADEMARKS.md](TRADEMARKS.md). The UI font is [Outfit](https://github.com/Outfitio/Outfit-Fonts),
+used under the [SIL Open Font License](assets/fonts/OFL.txt). Contributions are welcome under the same license
 ([CONTRIBUTING.md](CONTRIBUTING.md), [Code of conduct](CODE_OF_CONDUCT.md)).
 
 Built by [moller.studio](https://moller.studio) with AI-assisted development (Claude). All code is reviewed, tested

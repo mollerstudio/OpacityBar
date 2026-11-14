@@ -116,6 +116,9 @@ namespace OpacityBar
         public bool LaunchAtStartup { get; set; }  // mirrors the HKCU Run value; not trusted from the file
         public int RefreshRateMs { get; set; }
 
+        /// <summary>Also give the taskbar's hover panels (window previews) the look; false = they keep Windows' style.</summary>
+        public bool StylePopups { get; set; }
+
         /// <summary>v2 flag, migrated into UiTheme. (Other fields of old files are ignored when loading.)</summary>
         public bool UILightTheme { get; set; }
 
@@ -131,6 +134,7 @@ namespace OpacityBar
             UiTheme = 0;
             LaunchAtStartup = false;
             RefreshRateMs = 250;
+            StylePopups = false;   // hover previews keep the Windows look unless the user opts in
         }
 
         /// <summary>Copies every setting from another config into this instance (keeps object identity).</summary>
@@ -142,6 +146,7 @@ namespace OpacityBar
             RecentColors = new List<string>(o.RecentColors ?? new List<string>());
             UiTheme = o.UiTheme;
             LaunchAtStartup = o.LaunchAtStartup;
+            StylePopups = o.StylePopups;
             RefreshRateMs = o.RefreshRateMs;
         }
 

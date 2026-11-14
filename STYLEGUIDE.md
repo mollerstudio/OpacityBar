@@ -29,7 +29,7 @@ Disabled controls blend their ink 60% toward Surface.
 
 ## Type
 
-Font: **Segoe UI Variable Text**, falling back to **Segoe UI**.
+Font: **Outfit** (embedded; SemiBold for bold), falling back to **Segoe UI Variable Text**, then **Segoe UI**.
 Sizes are in points; render as pixels = pt x 96/72 x scale (`GraphicsUnit.Pixel`). One scale factor only: window DPI / 96.
 
 | Style | Size | Weight | Use |

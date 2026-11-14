@@ -5,6 +5,23 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-14
+
+### Added
+- "Style hover previews" switch (off by default): the panels that pop up when you hover a taskbar button keep
+  Windows' own look unless you turn it on.
+
+### Changed
+- New OpacityBar logo for the tray, the app and the installer.
+- The app and the installer now use the Outfit font (embedded, SIL Open Font License), with Segoe UI as a
+  fallback.
+
+### Fixed
+- With "Style hover previews" off, window previews no longer pick up the bar's style (they matched the
+  bar's rule too).
+- The window no longer freezes for a second or more when a style switches Windows mode; the theme-change
+  broadcast now runs in the background.
+
 ## [1.2.1] - 2026-11-12
 
 ### Changed
@@ -61,7 +78,8 @@ The first public release, under the new name **OpacityBar** (previously Opacbar)
 
 - First test version, as Opacbar (development builds only, never published as a release).
 
-[Unreleased]: https://github.com/mollerstudio/OpacityBar/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/mollerstudio/OpacityBar/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.3.0
 [1.2.1]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.2.1
 [1.2.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.2.0
 [1.1.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.1.0

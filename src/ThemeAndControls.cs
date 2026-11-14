@@ -256,6 +256,55 @@ namespace OpacityBar
         }
 
         /// <summary>Font sized in points at the current scale, built in pixels so it is DPI-correct.</summary>
+        // Outfit (SIL Open Font License), embedded by build.ps1. Loaded into GDI+ (for Font objects)
+        // and GDI (for TextRenderer). Falls back to Segoe UI if the files are missing.
+        private static PrivateFontCollection _outfit;
+        private static FontFamily _outfitRegular, _outfitSemiBold;
+        private static bool _outfitTried;
+
+        [DllImport("gdi32.dll")]
+        private static extern IntPtr AddFontMemResourceEx(IntPtr pbFont, uint cbFont, IntPtr pdv, out uint pcFonts);
+
+        private static void LoadOutfit()
+        {
+            if (_outfitTried) return;
+            _outfitTried = true;
+            try
+            {
+                _outfit = new PrivateFontCollection();
+                System.Reflection.Assembly asm = typeof(Theme).Assembly;
+                foreach (string name in new[] { "Outfit-Regular.ttf", "Outfit-SemiBold.ttf" })
+                {
+                    using (System.IO.Stream s = asm.GetManifestResourceStream(name))
+                    {
+                        if (s == null) continue;
+                        byte[] data = new byte[s.Length];
+                        int read = 0;
+                        while (read < data.Length) { int n = s.Read(data, read, data.Length - read); if (n <= 0) break; read += n; }
+                        IntPtr mem = Marshal.AllocCoTaskMem(data.Length); // kept for the life of the process
+                        Marshal.Copy(data, 0, mem, data.Length);
+                        _outfit.AddMemoryFont(mem, data.Length);
+                        uint count;
+                        AddFontMemResourceEx(mem, (uint)data.Length, IntPtr.Zero, out count);
+                    }
+                }
+                foreach (FontFamily f in _outfit.Families)
+                {
+                    if (string.Equals(f.Name, "Outfit", StringComparison.OrdinalIgnoreCase)) _outfitRegular = f;
+                    else if (string.Equals(f.Name, "Outfit SemiBold", StringComparison.OrdinalIgnoreCase)) _outfitSemiBold = f;
+                }
+            }
+            catch { _outfitRegular = null; _outfitSemiBold = null; }
+        }
+
+        private static Font CreateFont(float px, bool bold)
+        {
+            LoadOutfit();
+            if (bold && _outfitSemiBold != null) return new Font(_outfitSemiBold, px, FontStyle.Regular, GraphicsUnit.Pixel);
+            if (_outfitRegular != null) return new Font(_outfitRegular, px, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+            return new Font(Family, px, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+        }
+
         public static Font Font(float pt, bool bold)
         {
             string key = pt.ToString("0.0") + (bold ? "b" : "r") + _scale.ToString("0.000");
@@ -263,7 +312,7 @@ namespace OpacityBar
             if (!_fonts.TryGetValue(key, out f))
             {
                 float px = pt * 96f / 72f * _scale;
-                f = new Font(Family, px, bold ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Pixel);
+                f = CreateFont(px, bold);
                 _fonts[key] = f;
             }
             return f;

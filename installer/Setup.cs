@@ -299,7 +299,7 @@ namespace OpacityBar.Setup
             else DrawGlyphLogo(g, lr);
 
             // Title + subtitle
-            using (Font title = new Font(Theme.Title.FontFamily, Theme.PxF(26), FontStyle.Bold, GraphicsUnit.Pixel))
+            using (Font title = new Font(Theme.Title.FontFamily, Theme.PxF(26), Theme.Title.Style, GraphicsUnit.Pixel))
                 Gfx.Text(g, AppInfo.Name, title, new Rectangle(0, Theme.Px(148), W, Theme.Px(36)), Theme.Text, Theme.Surface,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 

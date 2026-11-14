@@ -16,8 +16,14 @@ namespace OpacityBar
     {
         public const string Header = "opacbar-rules 2";
 
-        private const string FillSelector = "Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill";
-        private const string StrokeSelector = "Windows.UI.Xaml.Shapes.Rectangle#BackgroundStroke";
+        // Any element with these names: the taskbar and its hover panels (window previews) use them.
+        private const string AnyFill = "Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill";
+        private const string AnyStroke = "Windows.UI.Xaml.Shapes.Rectangle#BackgroundStroke";
+        // Only the bar itself; hover panels keep Windows' style. Window previews use a TaskbarBackground
+        // too, so the path is anchored at the bar's own frame: TaskbarFrame > RootGrid > TaskbarBackground.
+        private const string BarPath = "Taskbar.TaskbarFrame > Windows.UI.Xaml.Controls.Grid#RootGrid > Taskbar.TaskbarBackground > Windows.UI.Xaml.Controls.Grid > ";
+        private const string BarFill = BarPath + "Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill";
+        private const string BarStroke = BarPath + "Windows.UI.Xaml.Shapes.Rectangle#BackgroundStroke";
 
         /// <summary>A document with no rules: the helper restores everything.</summary>
         public static string EmptyDocument()
@@ -25,8 +31,10 @@ namespace OpacityBar
             return Header;
         }
 
-        public static string Compile(StyleProfile p)
+        public static string Compile(StyleProfile p, bool stylePopups)
         {
+            string FillSelector = stylePopups ? AnyFill : BarFill;
+            string StrokeSelector = stylePopups ? AnyStroke : BarStroke;
             if (p == null || p.Material == Material.Normal) return EmptyDocument();   // stock Windows look
 
             StringBuilder sb = new StringBuilder(Header);

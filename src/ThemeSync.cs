@@ -44,7 +44,7 @@ namespace OpacityBar
         /// <summary>Engine tick: keeps Windows mode matching the bar. Cheap between checks.</summary>
         public static void Update(StyleProfile p, bool force)
         {
-            if (p == null || p.Material == Material.Normal) { Restore(); return; }
+            if (p == null || p.Material == Material.Normal) { Restore(false); return; }
             long now = Clock.ElapsedMilliseconds;
             if (!force && now - _checkedAt < RefreshMs) return;
             _checkedAt = now;
@@ -58,7 +58,7 @@ namespace OpacityBar
                 if (wantLight == currentLight) return;
 
                 if (ReadSaved() < 0) WriteSaved(currentLight ? 1 : 0);   // remember the user's own choice once
-                SetSystemLight(wantLight);
+                SetSystemLight(wantLight, false);
                 Diagnostics.Log("windows mode -> " + (wantLight ? "light" : "dark") + " (bar luminance " + l.ToString("0.00") + ")");
             }
             catch (Exception ex)
@@ -70,11 +70,17 @@ namespace OpacityBar
         /// <summary>Puts the user's own Windows mode back (Normal style, quit, uninstall). No-op if never changed.</summary>
         public static void Restore()
         {
+            Restore(true);
+        }
+
+        /// <param name="wait">Wait for the change broadcast (quit/uninstall); the UI never waits.</param>
+        private static void Restore(bool wait)
+        {
             try
             {
                 int saved = ReadSaved();
                 if (saved < 0) return;
-                if (ReadSystemLight() != (saved == 1)) SetSystemLight(saved == 1);
+                if (ReadSystemLight() != (saved == 1)) SetSystemLight(saved == 1, wait);
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(SavedKey, true))
                     if (k != null) k.DeleteValue(SavedName, false);
                 Diagnostics.Log("windows mode restored -> " + (saved == 1 ? "light" : "dark"));
@@ -176,14 +182,27 @@ namespace OpacityBar
             }
         }
 
-        private static void SetSystemLight(bool light)
+        private static readonly object BroadcastLock = new object();
+
+        private static void SetSystemLight(bool light, bool wait)
         {
             using (RegistryKey k = Registry.CurrentUser.CreateSubKey(PersonalizeKey))
                 k.SetValue(ValueName, light ? 1 : 0, RegistryValueKind.DWord);
-            // Tell Explorer and others that the theme changed (what the Settings app does).
-            UIntPtr result;
-            SendMessageTimeout(new IntPtr(0xFFFF), 0x001A /* WM_SETTINGCHANGE */, UIntPtr.Zero, "ImmersiveColorSet",
-                0x0002 /* SMTO_ABORTIFHUNG */, 1000, out result);
+            // Tell Explorer and others that the theme changed (what the Settings app does). The broadcast
+            // visits every top-level window and takes a second or more, so it never runs on the UI thread.
+            System.Threading.Thread t = new System.Threading.Thread(delegate ()
+            {
+                lock (BroadcastLock)
+                {
+                    UIntPtr result;
+                    SendMessageTimeout(new IntPtr(0xFFFF), 0x001A /* WM_SETTINGCHANGE */, UIntPtr.Zero, "ImmersiveColorSet",
+                        0x0002 /* SMTO_ABORTIFHUNG */, 1000, out result);
+                }
+            });
+            t.IsBackground = !wait;
+            t.Name = "OpacityBarThemeBroadcast";
+            t.Start();
+            if (wait) t.Join(5000);
         }
 
         private static int ReadSaved()

@@ -49,7 +49,7 @@ namespace OpacityBar
         private LabeledSlider _opacity;
         private LabeledSlider _blurAmount;
         private TextBlock _hint, _normalHint;
-        private Row _topLine;
+        private Row _topLine, _popups;
 
         // General
         private Row _startup;
@@ -224,7 +224,17 @@ namespace OpacityBar
             p.Controls.Add(_blurAmount);
             p.Controls.Add(_opacity);
             p.Controls.Add(_hint);
+            ToggleSwitch popTog = new ToggleSwitch();
+            _popups = new Row("Style hover previews", popTog);
+            popTog.CheckedChanged += delegate
+            {
+                if (_syncing) return;
+                _config.StylePopups = popTog.Checked;
+                Commit();
+            };
+
             p.Controls.Add(_topLine);
+            p.Controls.Add(_popups);
             return p;
         }
 
@@ -348,6 +358,7 @@ namespace OpacityBar
                 _picker.Value = pc;
                 _colorRow.Value = pc;
                 ((ToggleSwitch)_topLine.Trailing).Checked = Look.HideTopLine;
+                ((ToggleSwitch)_popups.Trailing).Checked = _config.StylePopups;
                 ((ToggleSwitch)_startup.Trailing).Checked = _config.LaunchAtStartup;
                 _themeSeg.SelectedIndex = _config.UiTheme;
             }
@@ -368,6 +379,7 @@ namespace OpacityBar
 
             _normalHint.Visible = normal;
             _topLine.Visible = !normal;
+            _popups.Visible = !normal;
             _colorRow.Visible = colored;
             _colorRow.Expanded = _pickerOpen;
             _picker.Visible = colored && _pickerOpen;
