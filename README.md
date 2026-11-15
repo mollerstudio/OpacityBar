@@ -13,6 +13,7 @@ A small, open-source tray app for Windows 11 and 10.
 [![Build](https://github.com/mollerstudio/OpacityBar/actions/workflows/build.yml/badge.svg)](https://github.com/mollerstudio/OpacityBar/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/mollerstudio/OpacityBar?label=release)](https://github.com/mollerstudio/OpacityBar/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
+[![Built with Claude](https://img.shields.io/badge/built%20with-Claude-black.svg)](#how-it-was-made)
 
 [**Download**](https://github.com/mollerstudio/OpacityBar/releases/latest) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/mollerstudio/OpacityBar/issues/new/choose)
 
@@ -120,6 +121,16 @@ assets/       icons, logo and the Outfit font, picked up by the build
 docs/         images for this README
 ```
 
+## How it was made
+
+OpacityBar is designed and directed by [moller.studio](https://moller.studio), and the code is written with
+[Claude](https://claude.ai), Anthropic's AI. I decide what it should do and how it should look, test every
+version on real hardware, and check that it does nothing beyond the taskbar's look. Claude writes the code.
+I'm a designer, not a programmer, and couldn't have built this by hand.
+
+That's why the whole source is open: you don't have to trust me or the AI, you can read it. If you find a bug
+or something that looks wrong, please [open an issue](https://github.com/mollerstudio/OpacityBar/issues/new/choose).
+
 ## License
 
 The code is [MIT](LICENSE) © 2026 [moller.studio](https://moller.studio). The OpacityBar name and logo are not
@@ -127,5 +138,4 @@ covered by the MIT license; see [TRADEMARKS.md](TRADEMARKS.md). The UI font is [
 used under the [SIL Open Font License](assets/fonts/OFL.txt). Contributions are welcome under the same license
 ([CONTRIBUTING.md](CONTRIBUTING.md), [Code of conduct](CODE_OF_CONDUCT.md)).
 
-Built by [moller.studio](https://moller.studio) with AI-assisted development (Claude). All code is reviewed, tested
-and open for anyone to audit. OpacityBar is an independent project, not affiliated with Microsoft.
+OpacityBar is an independent project, not affiliated with Microsoft or Anthropic.
