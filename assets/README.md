@@ -1,6 +1,6 @@
 # Branding assets
 
-Everything here is generated from the logo PDF (`OpacityBar-logo.pdf`: page 1 black, page 2 white):
+The icons and logos here are generated from the logo PDF (`OpacityBar-logo.pdf`: page 1 black, page 2 white):
 
 ```powershell
 .\tools\make-assets.ps1 -Pdf assets\OpacityBar-logo.pdf
@@ -14,6 +14,7 @@ Everything here is generated from the logo PDF (`OpacityBar-logo.pdf`: page 1 bl
 | `tray-white.ico` | Tray icon on a **dark** taskbar |
 | `logo-black.png` | Installer logo on the light theme, and the fallback |
 | `logo-white.png` | Installer logo on the dark theme |
+| `fonts/Outfit-*.ttf` | UI font, embedded in the app and installer (not generated; [SIL Open Font License](fonts/OFL.txt)) |
 
 Rule: the black logo is used on light themes, the white one on dark themes, and the black one whenever a
 single icon has to work everywhere. The script also writes `docs/images/logo-*.png` for the README.

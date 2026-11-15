@@ -18,6 +18,11 @@ A small, open-source tray app for Windows 11 and 10.
 
 <img src="docs/images/flyout.png" width="380" alt="The OpacityBar flyout">
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/showcase-light.jpg">
+  <img src="docs/images/showcase-dark.jpg" width="800" alt="The taskbar in each OpacityBar style: Solid, Color 60%, Blur 10% with 10% tint, Blur 50% with no tint, and Clear">
+</picture>
+
 </div>
 
 ---
@@ -29,8 +34,9 @@ A small, open-source tray app for Windows 11 and 10.
 - **Adjustable blur.** A real blur of what's behind the taskbar, with a strength slider and an optional tint.
 - **Only the background changes.** Icons, text and the clock stay crisp and fully opaque. Clear is really 100% clear.
 - **Always readable.** On a light bar the taskbar switches to Windows' light mode (dark icons), on a dark bar to dark mode. Your apps keep their own theme, and your setting comes back when you quit.
+- **Hover previews your way.** The panels that pop up over taskbar buttons keep the Windows look, or follow your style if you turn on *Style hover previews*.
 - **Out of your way.** Lives in the tray, follows the Windows light/dark theme (the tray icon too), and starts with Windows if you want.
-- **Light and safe.** Under 1 MB, no admin rights, no network access, no telemetry. Quitting restores the normal taskbar.
+- **Light and safe.** About 0.5 MB, no admin rights, no network access, no telemetry. Quitting restores the normal taskbar.
 
 ## Install
 
@@ -47,7 +53,7 @@ The installer installs for your account only (to `%LocalAppData%\Programs\Opacit
 
 - **Left-click** the tray icon to open OpacityBar and pick a style.
 - **Right-click** it for a quick menu.
-- The **gear** opens settings: start with Windows, light/dark theme, reset, quit.
+- The **gear** opens settings: start with Windows, light/dark theme for the window, reset, quit.
 - **Ctrl + Shift + Alt + Q** quits instantly and restores the normal taskbar.
 
 > **Help wanted: tell us how it runs on your PC.** OpacityBar is tested on Windows 11 ARM64. Normal x64 PCs and
@@ -110,7 +116,7 @@ This produces `dist\OpacityBar.exe`, and `dist\OpacityBarSetup.exe` when both he
 src/          the app: tray, flyout UI, taskbar engine, helper loader (C#, .NET Framework 4.8)
 installer/    the installer window (shares the app's UI code)
 native/       the Explorer helper (C++), its exports and protocol
-assets/       icons and logo picked up by the build
+assets/       icons, logo and the Outfit font, picked up by the build
 docs/         images for this README
 ```
 

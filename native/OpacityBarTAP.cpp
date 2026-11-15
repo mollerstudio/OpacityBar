@@ -3,13 +3,13 @@
 // OpacityBar: https://github.com/mollerstudio/OpacityBar
 
 // =====================================================================================
-//  OpacbarTAP.cpp - the small helper that Opacbar loads into explorer.exe  (protocol v6)
+//  OpacityBarTAP.cpp - the small helper that OpacityBar loads into explorer.exe  (protocol v6)
 // =====================================================================================
 //
-//  PLAIN-ENGLISH SUMMARY (read this first if you are auditing Opacbar)
+//  PLAIN-ENGLISH SUMMARY (read this first if you are auditing OpacityBar)
 //  -------------------------------------------------------------------
 //  Windows 11 draws its taskbar with XAML. A normal app cannot reach into Explorer's
-//  XAML, so Opacbar uses Microsoft's official, documented XAML Diagnostics API
+//  XAML, so OpacityBar uses Microsoft's official, documented XAML Diagnostics API
 //  (InitializeXamlDiagnosticsEx - the same API Visual Studio's Live Visual Tree and
 //  TranslucentTB use) to load this DLL into explorer.exe. This file is the complete
 //  source of that DLL. Its only job is GENERIC STYLING OF TASKBAR XAML ELEMENTS:
@@ -29,7 +29,7 @@
 //       message-only window (class "OpacbarTAP.Sink"), plus one on our own small control
 //       thread (used for diagnostics and UNLOAD). Rules only ever touch elements inside
 //       taskbar trees (trees containing Taskbar.TaskbarFrame / SystemTray.SystemTrayFrame).
-//    4. Opacbar.exe sends those windows (see native/PROTOCOL.md):
+//    4. OpacityBar.exe sends those windows (see native/PROTOCOL.md):
 //         RULES (WM_COPYDATA 'OPAC') - a list of "selector, property, value" rules.
 //                  We set those properties on the matching taskbar elements and restore
 //                  the original values of properties no longer targeted.
@@ -93,7 +93,7 @@
 //
 //  Build (MSVC, from a VS developer prompt; the Windows SDK provides C++/WinRT):
 //    cl /nologo /LD /O2 /std:c++17 /EHsc /permissive- /GS /W4 /DUNICODE /D_UNICODE ^
-//       native\OpacbarTAP.cpp /Fe:OpacbarTAP.x64.dll /link /DEF:native\OpacbarTAP.def ^
+//       native\OpacityBarTAP.cpp /Fe:OpacityBarTAP.x64.dll /link /DEF:native\OpacityBarTAP.def ^
 //       kernel32.lib ole32.lib oleaut32.lib user32.lib dxguid.lib windowsapp.lib
 //
 //  License: MIT (see LICENSE in the repository root).
@@ -135,7 +135,7 @@
 #include <winrt/Windows.UI.Xaml.Shapes.h>
 
 // -------------------------------------------------------------------------------------
-//  IPC contract with Opacbar.exe (see native/PROTOCOL.md, keep in sync with src/*.cs)
+//  IPC contract with OpacityBar.exe (see native/PROTOCOL.md, keep in sync with src/*.cs)
 // -------------------------------------------------------------------------------------
 #define OPAC_SINK_CLASS       L"OpacbarTAP.Sink"
 #define WM_OPAC_SET           (WM_APP + 0x10)  // v1: wParam = 0xAARRGGBB, lParam = flags.
@@ -152,7 +152,7 @@
 #define OPAC_PROTOCOL_VERSION 6   // 2 = first v2 build (no STATS/UNLOAD), 3 = + STATS/UNLOAD, 4 = tree service via IXamlDiagnostics,
                                   // 5 = originals kept alive (exact restore of Explorer's acrylic brush),
                                   // 6 = "@blur:<radius>:<#AARRGGBB>" adjustable blur brush values
-                                  // Bump on EVERY helper change: Opacbar restarts Explorer to load a newer helper.
+                                  // Bump on EVERY helper change: OpacityBar restarts Explorer to load a newer helper.
 #define OPAC_FLAG_ON          0x1              // v1 SET bit0: override on
 #define OPAC_FLAG_HIDE_STROKE 0x2              // v1 SET bit1: make BackgroundStroke transparent too
 #define OPAC_COPYDATA_RULES   0x4F504143       // 'OPAC'
@@ -2885,7 +2885,7 @@ public:
         }
         if (svc) svc->Release();
 
-        // Only one subscription per Explorer process, even if Opacbar injects again.
+        // Only one subscription per Explorer process, even if OpacityBar injects again.
         if (InterlockedCompareExchange(&g_advised, 1, 0) != 0) return S_OK;
 
         // Callbacks + window procs + our threads live in this DLL: hold a module reference

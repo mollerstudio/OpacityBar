@@ -1,6 +1,6 @@
 # Privacy policy
 
-*Last updated: 11 November 2026 · Applies to OpacityBar 1.1.0 and later*
+*Last updated: 15 November 2026 · Applies to OpacityBar 1.1.0 and later*
 
 **Short version: OpacityBar collects nothing, sends nothing and has no network code.** It changes how your
 taskbar looks. That's all it does.
@@ -16,6 +16,7 @@ installer and its helper DLL. It does not cover GitHub, where the downloads are 
 - No personal data: it doesn't read your files, documents, browsing, or what's on your screen.
 - No keylogging or input hooks. It registers one hotkey (Ctrl+Shift+Alt+Q, emergency quit).
 - No admin rights, services, drivers or scheduled tasks.
+- No downloads: everything it needs, including its font, is built into the app.
 
 ## Everything OpacityBar touches on your PC
 
