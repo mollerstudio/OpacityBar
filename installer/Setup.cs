@@ -158,7 +158,7 @@ namespace OpacityBar.Setup
             BackColor = Theme.Surface;
             KeyPreview = true;
             ClientSize = new Size(Theme.Px(LogicalW), Theme.Px(LogicalH));
-            try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+            try { Icon = IconFactory.CreateWindowIcon() ?? Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
             _logo = LoadLogo();
 
             _startup.Checked = _installed == null || Lifecycle.IsRunAtStartup();

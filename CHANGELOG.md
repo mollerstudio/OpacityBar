@@ -5,6 +5,15 @@ and versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-23
+
+### Fixed
+- The installer's taskbar button shows the logo clearly: white on a dark taskbar, black on a light one,
+  instead of a dark box.
+- "Search box" set to Dark or Light now gives the box a solid fill, so it is really dark (or light) on any
+  bar. Before, Windows' see-through fill made it look only slightly more transparent on a light bar.
+- The "Search box" option also targets the search box on older Windows 11 builds.
+
 ## [1.4.0] - 2026-11-23
 
 ### Added
@@ -89,7 +98,8 @@ The first public release, under the new name **OpacityBar** (previously Opacbar)
 
 - First test version, as Opacbar (development builds only, never published as a release).
 
-[Unreleased]: https://github.com/mollerstudio/OpacityBar/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/mollerstudio/OpacityBar/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.4.1
 [1.4.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.4.0
 [1.3.1]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.3.1
 [1.3.0]: https://github.com/mollerstudio/OpacityBar/releases/tag/v1.3.0

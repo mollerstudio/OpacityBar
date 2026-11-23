@@ -113,6 +113,11 @@ foreach ($n in "logo-black.png", "logo-white.png") {
     if (Test-Path $f) { $SetupExtra += "/resource:$f,$n"; Say "embedding assets\$n in the installer" }
 }
 $SetupExtra += $FontRes
+# Taskbar-button icon of the installer window: white logo on a dark taskbar, black on a light one.
+foreach ($n in "tray-black.ico", "tray-white.ico") {
+    $f = Join-Path $Assets $n
+    if (Test-Path $f) { $SetupExtra += "/resource:$f,$n" }
+}
 
 # The installer shares the app's theme, controls and install plumbing.
 $SetupSources = @("AppInfo.cs", "Lifecycle.cs", "NativeMethods.cs", "ThemeAndControls.cs") | ForEach-Object { Join-Path $SrcDir $_ }

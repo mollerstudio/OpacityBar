@@ -1836,6 +1836,25 @@ namespace OpacityBar
             return DrawGlyph(active, lightTaskbar, size);
         }
 
+        /// <summary>
+        /// Window/taskbar-button icon that stands out on the current taskbar: the white logo on a dark taskbar,
+        /// the black one on a light taskbar (all sizes kept, so Windows picks a sharp one). Null if not embedded.
+        /// </summary>
+        public static Icon CreateWindowIcon()
+        {
+            bool light = Theme.SystemTaskbarLight();
+            foreach (string name in light ? new[] { "tray-black.ico" } : new[] { "tray-white.ico", "tray-black.ico" })
+            {
+                try
+                {
+                    using (System.IO.Stream s = typeof(IconFactory).Assembly.GetManifestResourceStream(name))
+                        if (s != null) return new Icon(s);
+                }
+                catch { }
+            }
+            return null;
+        }
+
         /// <summary>An icon resource embedded by build.ps1 (assets/*.ico), at the requested size, or null.</summary>
         public static Icon LoadEmbedded(string name, int size)
         {

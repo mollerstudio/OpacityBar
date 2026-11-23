@@ -23,6 +23,8 @@ namespace OpacityBar
         // too, so the path is anchored at the bar's own frame: TaskbarFrame > RootGrid > TaskbarBackground.
         private const string BarPath = "Taskbar.TaskbarFrame > Windows.UI.Xaml.Controls.Grid#RootGrid > Taskbar.TaskbarBackground > Windows.UI.Xaml.Controls.Grid > ";
         private const string SearchBox = "SearchUx.SearchUI.SearchButtonControl";
+        private const string SearchBoxLegacy = "Taskbar.SearchBoxButton";
+        private const string SearchBoxFill = SearchBox + " > Windows.UI.Xaml.Controls.Border#BackgroundElement";
         private const string BarFill = BarPath + "Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill";
         private const string BarStroke = BarPath + "Windows.UI.Xaml.Shapes.Rectangle#BackgroundStroke";
 
@@ -73,7 +75,18 @@ namespace OpacityBar
             // Search box: force its dark or light look regardless of Windows mode (RequestedTheme is a normal
             // XAML property, so removing the rule gives Windows' own look back).
             if (searchBoxTheme == 1 || searchBoxTheme == 2)
-                AppendRule(sb, SearchBox, "RequestedTheme", searchBoxTheme == 1 ? "Dark" : "Light");
+            {
+                string theme = searchBoxTheme == 1 ? "Dark" : "Light";
+                AppendRule(sb, SearchBox, "RequestedTheme", theme);
+                // Windows' own fill is a faint see-through white, so "dark" only looks dark over a dark bar.
+                // Windows keeps re-setting that Border's brushes from code, so a solid rounded child fills it
+                // instead (verified on 26300: Background/BorderBrush rules don't stick, a Child does).
+                AppendRule(sb, SearchBoxFill, "Child", "<Border Background=\"" +
+                    (searchBoxTheme == 1 ? "#FF2E2E2E" : "#FFFAFAFA") + "\" CornerRadius=\"16\"/>");
+                // Older Windows 11 builds draw the search box with this element instead; a rule that
+                // matches nothing is ignored.
+                AppendRule(sb, SearchBoxLegacy, "RequestedTheme", theme);
+            }
 
             // Readable icons: ThemeSync switches Windows mode to match the bar (see ThemeSync.cs).
             return sb.ToString();
