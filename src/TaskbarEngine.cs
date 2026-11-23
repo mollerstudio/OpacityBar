@@ -137,7 +137,7 @@ namespace OpacityBar
                 return;
             }
 
-            string doc = TaskbarStyle.Compile(look, _config.StylePopups);
+            string doc = TaskbarStyle.Compile(look, _config.StylePopups, _config.SearchBoxTheme);
             bool styled = doc != TaskbarStyle.EmptyDocument(); // only load the helper when a rule exists
             uint pid;
             NativeMethods.GetWindowThreadProcessId(taskbars[0], out pid);

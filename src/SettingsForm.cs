@@ -49,7 +49,7 @@ namespace OpacityBar
         private LabeledSlider _opacity;
         private LabeledSlider _blurAmount;
         private TextBlock _hint, _normalHint;
-        private Row _topLine, _popups;
+        private Row _topLine, _popups, _search;
 
         // General
         private Row _startup;
@@ -233,7 +233,18 @@ namespace OpacityBar
                 Commit();
             };
 
+            SegmentedControl searchSeg = new SegmentedControl("System", "Dark", "Light");
+            searchSeg.LogicalWidth = 200;
+            _search = new Row("Search box", searchSeg);
+            searchSeg.SelectedIndexChanged += delegate
+            {
+                if (_syncing || searchSeg.SelectedIndex < 0) return;
+                _config.SearchBoxTheme = searchSeg.SelectedIndex;
+                Commit();
+            };
+
             p.Controls.Add(_topLine);
+            p.Controls.Add(_search);
             p.Controls.Add(_popups);
             return p;
         }
@@ -359,6 +370,7 @@ namespace OpacityBar
                 _colorRow.Value = pc;
                 ((ToggleSwitch)_topLine.Trailing).Checked = Look.HideTopLine;
                 ((ToggleSwitch)_popups.Trailing).Checked = _config.StylePopups;
+                ((SegmentedControl)_search.Trailing).SelectedIndex = _config.SearchBoxTheme;
                 ((ToggleSwitch)_startup.Trailing).Checked = _config.LaunchAtStartup;
                 _themeSeg.SelectedIndex = _config.UiTheme;
             }
@@ -380,6 +392,7 @@ namespace OpacityBar
             _normalHint.Visible = normal;
             _topLine.Visible = !normal;
             _popups.Visible = !normal;
+            _search.Visible = !normal;
             _colorRow.Visible = colored;
             _colorRow.Expanded = _pickerOpen;
             _picker.Visible = colored && _pickerOpen;

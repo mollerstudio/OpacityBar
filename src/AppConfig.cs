@@ -119,6 +119,9 @@ namespace OpacityBar
         /// <summary>Also give the taskbar's hover panels (window previews) the look; false = they keep Windows' style.</summary>
         public bool StylePopups { get; set; }
 
+        /// <summary>The taskbar search box: 0 = follow Windows mode, 1 = always dark, 2 = always light.</summary>
+        public int SearchBoxTheme { get; set; }
+
         /// <summary>v2 flag, migrated into UiTheme. (Other fields of old files are ignored when loading.)</summary>
         public bool UILightTheme { get; set; }
 
@@ -135,6 +138,7 @@ namespace OpacityBar
             LaunchAtStartup = false;
             RefreshRateMs = 250;
             StylePopups = false;   // hover previews keep the Windows look unless the user opts in
+            SearchBoxTheme = 0;
         }
 
         /// <summary>Copies every setting from another config into this instance (keeps object identity).</summary>
@@ -147,12 +151,14 @@ namespace OpacityBar
             UiTheme = o.UiTheme;
             LaunchAtStartup = o.LaunchAtStartup;
             StylePopups = o.StylePopups;
+            SearchBoxTheme = o.SearchBoxTheme;
             RefreshRateMs = o.RefreshRateMs;
         }
 
         public void Clamp()
         {
             if (UiTheme < 0 || UiTheme > 2) UiTheme = 0;
+            if (SearchBoxTheme < 0 || SearchBoxTheme > 2) SearchBoxTheme = 0;
             RefreshRateMs = Math.Max(50, Math.Min(5000, RefreshRateMs));
             if (DesktopProfile == null) DesktopProfile = new StyleProfile();
             DesktopProfile.Clamp();

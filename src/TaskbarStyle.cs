@@ -22,6 +22,7 @@ namespace OpacityBar
         // Only the bar itself; hover panels keep Windows' style. Window previews use a TaskbarBackground
         // too, so the path is anchored at the bar's own frame: TaskbarFrame > RootGrid > TaskbarBackground.
         private const string BarPath = "Taskbar.TaskbarFrame > Windows.UI.Xaml.Controls.Grid#RootGrid > Taskbar.TaskbarBackground > Windows.UI.Xaml.Controls.Grid > ";
+        private const string SearchBox = "SearchUx.SearchUI.SearchButtonControl";
         private const string BarFill = BarPath + "Windows.UI.Xaml.Shapes.Rectangle#BackgroundFill";
         private const string BarStroke = BarPath + "Windows.UI.Xaml.Shapes.Rectangle#BackgroundStroke";
 
@@ -31,7 +32,7 @@ namespace OpacityBar
             return Header;
         }
 
-        public static string Compile(StyleProfile p, bool stylePopups)
+        public static string Compile(StyleProfile p, bool stylePopups, int searchBoxTheme)
         {
             string FillSelector = stylePopups ? AnyFill : BarFill;
             string StrokeSelector = stylePopups ? AnyStroke : BarStroke;
@@ -68,6 +69,11 @@ namespace OpacityBar
             // Hide the top line by fading it out. Replacing its Fill brush knocks the blur into a flat
             // fallback on Win11 26300 (verified: Blur + replaced line brush = sharp gray haze).
             if (p.HideTopLine) AppendRule(sb, StrokeSelector, "Opacity", "0");
+
+            // Search box: force its dark or light look regardless of Windows mode (RequestedTheme is a normal
+            // XAML property, so removing the rule gives Windows' own look back).
+            if (searchBoxTheme == 1 || searchBoxTheme == 2)
+                AppendRule(sb, SearchBox, "RequestedTheme", searchBoxTheme == 1 ? "Dark" : "Light");
 
             // Readable icons: ThemeSync switches Windows mode to match the bar (see ThemeSync.cs).
             return sb.ToString();

@@ -35,6 +35,7 @@ A small, open-source tray app for Windows 11 and 10.
 - **Adjustable blur.** A real blur of what's behind the taskbar, with a strength slider and an optional tint.
 - **Only the background changes.** Icons, text and the clock stay crisp and fully opaque. Clear is really 100% clear.
 - **Always readable.** On a light bar the taskbar switches to Windows' light mode (dark icons), on a dark bar to dark mode. Your apps keep their own theme, and your setting comes back when you quit.
+- **Search box your way.** Keep the taskbar search box dark or light, whatever Windows mode is set to.
 - **Hover previews your way.** The panels that pop up over taskbar buttons keep the Windows look, or follow your style if you turn on *Style hover previews*.
 - **Out of your way.** Lives in the tray, follows the Windows light/dark theme (the tray icon too), and starts with Windows if you want.
 - **Light and safe.** About 0.5 MB, no admin rights, no network access, no telemetry. Quitting restores the normal taskbar.
